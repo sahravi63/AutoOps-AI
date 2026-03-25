@@ -19,6 +19,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 from app.config.settings import settings
+from app.llm_client import llm_complete, get_llm_client
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -137,6 +138,97 @@ def _extract_context(task: str) -> Dict[str, Any]:
     return ctx
 
 
+# ── DB-aware ID resolvers ────────────────────────────────────────────────────
+# Each resolver tries to find a real ID from SQLite before falling back.
+# This prevents MOCK IDs from reaching tools that query the real database.
+
+def _db_query(sql: str, params: tuple):
+    """Run a single-row SQLite query against autoops.db. Returns the row or None."""
+    try:
+        import sqlite3 as _sqlite3
+        from pathlib import Path as _Path
+        db_path = _Path(__file__).parent.parent.parent / "autoops.db"
+        conn = _sqlite3.connect(str(db_path))
+        conn.row_factory = _sqlite3.Row
+        row = conn.execute(sql, params).fetchone()
+        conn.close()
+        return row
+    except Exception as e:
+        logger.warning(f"[MockPlanner] DB lookup failed: {e}")
+        return None
+
+
+def _resolve_transaction_id(ctx: Dict[str, Any]) -> str:
+    """Return a real txn_id from context, DB lookup by customer, or sentinel."""
+    if ctx.get("transaction_id"):
+        return ctx["transaction_id"]
+    customer_id = ctx.get("customer_id")
+    if customer_id:
+        row = _db_query(
+            "SELECT txn_id FROM transactions WHERE customer_id=? ORDER BY created_at DESC LIMIT 1",
+            (customer_id,)
+        )
+        if row:
+            logger.info(f"[MockPlanner] Resolved transaction_id={row['txn_id']} for customer={customer_id}")
+            return row["txn_id"]
+    return "TXN-UNKNOWN"
+
+
+def _resolve_order_id(ctx: Dict[str, Any]) -> str:
+    """Return a real order_id from context, DB lookup by customer, or sentinel."""
+    if ctx.get("order_id"):
+        return ctx["order_id"]
+    customer_id = ctx.get("customer_id")
+    if customer_id:
+        row = _db_query(
+            "SELECT order_id FROM orders WHERE customer_id=? ORDER BY created_at DESC LIMIT 1",
+            (customer_id,)
+        )
+        if row:
+            logger.info(f"[MockPlanner] Resolved order_id={row['order_id']} for customer={customer_id}")
+            return row["order_id"]
+    return "ORD-UNKNOWN"
+
+
+def _resolve_customer_id(ctx: Dict[str, Any]) -> str:
+    """Return a real customer_id from context, DB lookup by order/txn, or sentinel."""
+    if ctx.get("customer_id"):
+        return ctx["customer_id"]
+    order_id = ctx.get("order_id")
+    if order_id:
+        row = _db_query(
+            "SELECT customer_id FROM orders WHERE order_id=? LIMIT 1",
+            (order_id,)
+        )
+        if row:
+            logger.info(f"[MockPlanner] Resolved customer_id={row['customer_id']} for order={order_id}")
+            return row["customer_id"]
+    txn_id = ctx.get("transaction_id")
+    if txn_id:
+        row = _db_query(
+            "SELECT customer_id FROM transactions WHERE txn_id=? LIMIT 1",
+            (txn_id,)
+        )
+        if row:
+            logger.info(f"[MockPlanner] Resolved customer_id={row['customer_id']} for txn={txn_id}")
+            return row["customer_id"]
+    return "CUST-UNKNOWN"
+
+
+def _resolve_customer_email(ctx: Dict[str, Any]) -> str:
+    """Return a real customer email from DB, or a safe default."""
+    customer_id = _resolve_customer_id(ctx)
+    if not customer_id.endswith("UNKNOWN"):
+        row = _db_query(
+            "SELECT email FROM customers WHERE customer_id=? LIMIT 1",
+            (customer_id,)
+        )
+        if row and row["email"]:
+            logger.info(f"[MockPlanner] Resolved email={row['email']} for customer={customer_id}")
+            return row["email"]
+    return "customer@example.com"
+
+
 def _build_steps(workflow_type: str, task: str, ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Return a task-specific, multi-step plan whose steps reflect what the task
@@ -148,7 +240,7 @@ def _build_steps(workflow_type: str, task: str, ctx: Dict[str, Any]) -> List[Dic
 
     # ── REFUND ───────────────────────────────────────────────────────────────
     if workflow_type == "refund":
-        txn_id = ctx.get("transaction_id", "TXN-MOCK-001")
+        txn_id = _resolve_transaction_id(ctx)
         amount = ctx.get("amount")
         return [
             {
@@ -184,8 +276,10 @@ def _build_steps(workflow_type: str, task: str, ctx: Dict[str, Any]) -> List[Dic
 
     # ── DUPLICATE CHARGE ─────────────────────────────────────────────────────
     if workflow_type == "duplicate":
-        customer_id = ctx.get("customer_id", "CUST-MOCK-001")
+        customer_id = _resolve_customer_id(ctx)
         amount      = ctx.get("amount", 0.0)
+        txn_id      = _resolve_transaction_id(ctx)
+        email       = _resolve_customer_email(ctx)
         return [
             {
                 "step_number": 1, "agent": "executor",
@@ -199,7 +293,7 @@ def _build_steps(workflow_type: str, task: str, ctx: Dict[str, Any]) -> List[Dic
                 "tool": "payment_tool", "action": "refund",
                 "description": "Refund the duplicate transaction",
                 "parameters": {
-                    "transaction_id": ctx.get("transaction_id", "TXN-MOCK-DUP"),
+                    "transaction_id": txn_id,
                     "reason": "Duplicate charge detected",
                 },
                 "depends_on": [1],
@@ -209,7 +303,7 @@ def _build_steps(workflow_type: str, task: str, ctx: Dict[str, Any]) -> List[Dic
                 "tool": "notification_tool", "action": "send_email",
                 "description": "Email customer confirmation of duplicate refund",
                 "parameters": {
-                    "to": "customer@example.com",
+                    "to": email,
                     "subject": "Duplicate Charge Refunded",
                     "body": f"We've refunded your duplicate charge. Task: {short_task}",
                 },
@@ -219,7 +313,7 @@ def _build_steps(workflow_type: str, task: str, ctx: Dict[str, Any]) -> List[Dic
 
     # ── PAYMENT (generic — check status / process) ────────────────────────────
     if workflow_type == "payment":
-        txn_id = ctx.get("transaction_id", "TXN-MOCK-001")
+        txn_id = _resolve_transaction_id(ctx)
         return [
             {
                 "step_number": 1, "agent": "executor",
@@ -250,7 +344,7 @@ def _build_steps(workflow_type: str, task: str, ctx: Dict[str, Any]) -> List[Dic
 
     # ── DELIVERY ─────────────────────────────────────────────────────────────
     if workflow_type == "delivery":
-        order_id = ctx.get("order_id", "ORD-MOCK-001")
+        order_id = _resolve_order_id(ctx)
         return [
             {
                 "step_number": 1, "agent": "executor",
@@ -423,8 +517,9 @@ def _build_steps(workflow_type: str, task: str, ctx: Dict[str, Any]) -> List[Dic
 
     # ── INVOICE ───────────────────────────────────────────────────────────────
     if workflow_type == "invoice":
-        order_id    = ctx.get("order_id",    "ORD-MOCK-001")
-        customer_id = ctx.get("customer_id", "CUST-MOCK-001")
+        order_id    = _resolve_order_id(ctx)
+        customer_id = _resolve_customer_id(ctx)
+        email       = _resolve_customer_email(ctx)
         return [
             {
                 "step_number": 1, "agent": "executor",
@@ -445,8 +540,9 @@ def _build_steps(workflow_type: str, task: str, ctx: Dict[str, Any]) -> List[Dic
                 "tool": "invoice_tool", "action": "send_invoice",
                 "description": "Email invoice to customer",
                 "parameters": {
-                    "invoice_id": ctx.get("invoice_id", "INV-MOCK-001"),
-                    "email": "customer@example.com",
+                    # invoice_id will be resolved at runtime from Step 2 output by executor
+                    "invoice_id": f"${{step2.invoice_id}}",
+                    "email": email,
                 },
                 "depends_on": [2],
             },
@@ -478,7 +574,7 @@ def _build_steps(workflow_type: str, task: str, ctx: Dict[str, Any]) -> List[Dic
                     "table":     "orders",
                     "filters":   {},
                     "limit":     10,
-                    "record_id": ctx.get("order_id", "REC-MOCK-001"),
+                    "record_id": _resolve_order_id(ctx),
                     "data":      {"updated_by": "autoops", "task": short_task},
                 },
                 "depends_on": [],
@@ -558,18 +654,32 @@ def _build_steps(workflow_type: str, task: str, ctx: Dict[str, Any]) -> List[Dic
     ]
 
 
-def _mock_plan(task: str, feedback: str = "") -> Dict[str, Any]:
+def _mock_plan(task: str, feedback: str = "", memory_hints: list = None) -> Dict[str, Any]:
     """
     Intelligent rule-based planner used when no API key is configured.
 
     Detects workflow type via keyword scoring, extracts structured context
     (IDs, amounts, priority) from the task text, then builds a multi-step
     plan whose steps and parameters are specific to what the task actually
-    asks for — not a generic 2-step template.
+    asks for.  When memory_hints are provided, logs and potentially adjusts
+    the priority/risk based on past failure patterns.
     """
     workflow_type = _infer_workflow_type(task)
     ctx           = _extract_context(task)
-    steps         = _build_steps(workflow_type, task, ctx)
+
+    # ── Apply memory hints to adjust planning context ────────────────────
+    if memory_hints:
+        for hint in memory_hints[:2]:
+            doc = hint.get("document", "").lower()
+            # If a past workflow of this type failed, bump risk
+            if "failed" in doc and workflow_type in doc:
+                logger.info(f"[MockPlanner] Memory hint suggests prior failure for '{workflow_type}' — bumping risk")
+                ctx["_memory_risk_bump"] = True
+            # If a past solution mentions a specific action sequence, log it
+            if "solution:" in doc:
+                logger.info(f"[MockPlanner] Memory hint solution: {doc[doc.find('solution:')+9:][:80]}")
+
+    steps = _build_steps(workflow_type, task, ctx)
 
     # Risk: high if urgency extracted OR workflow is payment/incident
     risk = "high"   if ctx.get("priority") == "high" or workflow_type in ("incident", "refund", "duplicate") \
@@ -599,18 +709,15 @@ def _mock_plan(task: str, feedback: str = "") -> Dict[str, Any]:
 
 class PlannerAgent:
     def __init__(self):
-        api_key = settings.ANTHROPIC_API_KEY or os.getenv("ANTHROPIC_API_KEY", "")
-        if api_key:
-            import anthropic
-            self.client = anthropic.Anthropic(api_key=api_key)
-            self._use_mock = False
-            logger.info("[PlannerAgent] Initialized with real Claude API")
+        client = get_llm_client()
+        self._use_mock = (client is None)
+        if not self._use_mock:
+            logger.info(f"[PlannerAgent] Initialized with {client.provider} LLM")
         else:
-            self.client = None
-            self._use_mock = True
             logger.warning(
-                "[PlannerAgent] No ANTHROPIC_API_KEY found — running in MOCK mode. "
-                "Set ANTHROPIC_API_KEY in your .env to enable real LLM planning."
+                "[PlannerAgent] No LLM API key found — running in MOCK mode. "
+                "Set ANTHROPIC_API_KEY, GROQ_API_KEY, or HF_API_KEY in .env "
+                "to enable real LLM planning."
             )
 
     def plan(
@@ -639,7 +746,7 @@ class PlannerAgent:
         # ── MOCK PATH ──────────────────────────────────────────────────────
         if self._use_mock:
             logger.info("[PlannerAgent] Using mock planner (no API key)")
-            plan = _mock_plan(task, feedback)
+            plan = _mock_plan(task, feedback, memory_hints or [])
             logger.info(
                 f"[PlannerAgent] Mock plan ready — {len(plan['steps'])} steps | "
                 f"type={plan['workflow_type']}"
@@ -662,14 +769,10 @@ class PlannerAgent:
                 f"Revise the plan to fix the above before retrying the same steps."
             )
 
-        message = self.client.messages.create(
-            model=settings.CLAUDE_MODEL,
-            max_tokens=1500,
-            system=PLANNER_SYSTEM,
-            messages=[{"role": "user", "content": user_content}],
-        )
-
-        raw = message.content[0].text.strip()
+        raw = llm_complete(PLANNER_SYSTEM, user_content, max_tokens=1500)
+        if raw is None:
+            logger.warning("[PlannerAgent] LLM returned None — falling back to mock")
+            return _mock_plan(task, feedback)
         if raw.startswith("```"):
             lines = raw.split("\n")
             raw = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])

@@ -22,7 +22,8 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from app.agents.executor_agent import ExecutorAgent
+from app.agents.executor_agent import ExecutorAgent, resolve_placeholders
+from app.agents.graph import GraphExecutor
 from app.agents.memory_agent import memory_agent
 from app.agents.planner_agent import PlannerAgent
 from app.agents.reviewer_agent import ReviewerAgent
@@ -55,13 +56,34 @@ async def run_autonomous_workflow(
     result = WorkflowResult(workflow_id=workflow_id, task=task)
     result.status = "running"
 
+    # ── Inject runtime API keys from dashboard context ────────────────────
+    # Dashboard passes keys as _anthropic_key / _groq_key / _hf_key in context
+    # so users can test with their own keys without touching .env
+    if context:
+        import os
+        from app.llm_client import _client_cache, _cache_ready
+        import app.llm_client as _llm_mod
+        key_map = {
+            "_anthropic_key": ("ANTHROPIC_API_KEY", os.environ),
+            "_groq_key":      ("GROQ_API_KEY",      os.environ),
+            "_hf_key":        ("HF_API_KEY",         os.environ),
+        }
+        for ctx_key, (env_key, env_dict) in key_map.items():
+            val = context.pop(ctx_key, None)
+            if val:
+                env_dict[env_key] = val
+                _llm_mod._cache_ready = False   # force re-init with new key
+                logger.info(f"[AutoOpsAI] Runtime key injected for {env_key[:12]}…")
+                break
+
     logger.info(f"[AutoOpsAI] ═══════════════════════════════════════")
     logger.info(f"[AutoOpsAI] Workflow {workflow_id} | Task: {task[:80]}")
     logger.info(f"[AutoOpsAI] ═══════════════════════════════════════")
 
-    planner  = PlannerAgent()
-    executor = ExecutorAgent()
-    reviewer = ReviewerAgent()
+    planner       = PlannerAgent()
+    executor      = ExecutorAgent()
+    graph_executor = GraphExecutor()
+    reviewer      = ReviewerAgent()
 
     # ── THINK: Search memory for similar past workflows ────────────────────
     logger.info(f"[THINK] Searching memory for similar workflows...")
@@ -101,9 +123,9 @@ async def run_autonomous_workflow(
         result.plan = plan
 
         # ── EXECUTE ────────────────────────────────────────────────────────
-        logger.info(f"[EXECUTE] Running {len(plan.get('steps', []))} steps...")
+        logger.info(f"[EXECUTE] Running {len(plan.get('steps', []))} steps (graph executor)...")
         try:
-            steps: List[AgentStep] = await executor.execute_plan(plan)
+            steps: List[AgentStep] = await graph_executor.run(plan, executor)
             result.steps = steps
             completed = sum(1 for s in steps if s.status == "completed")
             failed    = sum(1 for s in steps if s.status == "failed")
@@ -153,11 +175,33 @@ async def run_autonomous_workflow(
             _store_memory(task, plan, review)
             break
         else:
-            # Extract specific feedback for the next attempt
-            recs = review.get("recommendations", [])
-            issues = review.get("issues", [])
-            feedback = "; ".join(recs + issues) or "Improve coverage and reliability of steps"
-            logger.info(f"[UPDATE] Quality check FAILED — feedback: {feedback[:120]}")
+            # Build STRUCTURED, targeted feedback for the planner
+            recs    = review.get("recommendations", [])
+            issues  = review.get("issues", [])
+            patterns = review.get("failure_patterns", {})
+
+            # Prioritise the most actionable lines (recommendations first)
+            feedback_lines = recs[:3] + [i for i in issues[:2] if i not in recs]
+            if patterns:
+                dominant = max(patterns, key=patterns.get)
+                feedback_lines.insert(
+                    0,
+                    f"Dominant failure pattern: {dominant}. "
+                    f"Focus retry on fixing {dominant} issues."
+                )
+            feedback = " | ".join(feedback_lines) or \
+                       "Improve coverage and reliability of steps"
+
+            # Append failed step summaries so planner can replace them
+            failed_steps = [s for s in steps if s.status == "failed"]
+            if failed_steps:
+                failed_summary = "; ".join(
+                    f"step {s.step_number} ({s.tool}.{s.action})"
+                    for s in failed_steps
+                )
+                feedback += f" | Failed steps to replace: {failed_summary}"
+
+            logger.info(f"[UPDATE] Quality check FAILED — feedback: {feedback[:200]}")
 
             if loop_num < MAX_LOOPS:
                 logger.info(f"[UPDATE] Starting loop {loop_num + 1} with targeted feedback...")
@@ -227,6 +271,23 @@ async def run_autonomous_workflow_streaming(
     """
 
     workflow_id = str(uuid.uuid4())[:12]
+
+    # ── Inject runtime API keys from dashboard context ────────────────────
+    if context:
+        import os
+        import app.llm_client as _llm_mod
+        for ctx_key, env_key in [
+            ("_anthropic_key", "ANTHROPIC_API_KEY"),
+            ("_groq_key",      "GROQ_API_KEY"),
+            ("_hf_key",        "HF_API_KEY"),
+        ]:
+            val = context.pop(ctx_key, None)
+            if val:
+                os.environ[env_key] = val
+                _llm_mod._cache_ready = False
+                logger.info(f"[AutoOpsAI] Runtime key injected for {env_key[:12]}…")
+                break
+
     planner  = PlannerAgent()
     executor = ExecutorAgent()
     reviewer = ReviewerAgent()
@@ -275,14 +336,16 @@ async def run_autonomous_workflow_streaming(
         # ── EXECUTE ────────────────────────────────────────────────────────
         yield ("execute", {"message": "Executing plan steps..."})
         completed_steps: List[AgentStep] = []
+        step_outputs: Dict[int, Dict[str, Any]] = {}
         try:
             for step_cfg in plan.get("steps", []):
+                resolved_params = resolve_placeholders(step_cfg.get("parameters", {}), step_outputs)
                 step = AgentStep(
                     step_number=step_cfg.get("step_number", len(completed_steps) + 1),
                     agent=step_cfg.get("agent", "executor"),
                     tool=step_cfg.get("tool", ""),
                     action=step_cfg.get("action", "execute"),
-                    input_data={"parameters": step_cfg.get("parameters", {})},
+                    input_data={"parameters": resolved_params},
                 )
                 yield ("step_start", {
                     "step": step.step_number,
@@ -293,6 +356,7 @@ async def run_autonomous_workflow_streaming(
                 await asyncio.sleep(0.3)
                 step = await executor.execute_step(step)
                 completed_steps.append(step)
+                step_outputs[step.step_number] = step.output_data or {}
                 yield ("step_done", {
                     "step": step.step_number,
                     "status": step.status,
@@ -337,21 +401,34 @@ async def run_autonomous_workflow_streaming(
                 })
             break
         else:
-            recs = review.get("recommendations", [])
-            issues = review.get("issues", [])
-            feedback = "; ".join(recs + issues) or "Improve plan and retry"
+            recs     = review.get("recommendations", [])
+            issues   = review.get("issues", [])
+            patterns = review.get("failure_patterns", {})
+
+            feedback_lines = recs[:3] + [i for i in issues[:2] if i not in recs]
+            if patterns:
+                dominant = max(patterns, key=patterns.get)
+                feedback_lines.insert(0,
+                    f"Dominant failure: {dominant}. Fix {dominant} issues in retry.")
+            feedback = " | ".join(feedback_lines) or "Improve plan and retry"
+
+            failed_steps = [s for s in completed_steps if s.status == "failed"]
+            if failed_steps:
+                failed_summary = "; ".join(
+                    f"step {s.step_number} ({s.tool}.{s.action})" for s in failed_steps)
+                feedback += f" | Failed steps to replace: {failed_summary}"
+
             if loop_num < MAX_LOOPS:
                 yield ("update", {
-                    "action": "retry",
-                    "loop": loop_num,
+                    "action": "retry", "loop": loop_num,
                     "feedback": feedback,
-                    "message": f"Retrying with feedback: {feedback[:80]}...",
+                    "message": f"Retrying with targeted feedback: {feedback[:100]}...",
                 })
                 await asyncio.sleep(0.5)
             else:
                 yield ("update", {
                     "action": "max_loops",
-                    "message": f"Max loops reached — delivering best result",
+                    "message": "Max loops reached — delivering best result",
                 })
 
     # ── COMPLETE ───────────────────────────────────────────────────────────

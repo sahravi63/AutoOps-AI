@@ -1,0 +1,16 @@
+# AutoOps AI — Backend Dependencies
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+requests>=2.31.0
+
+# LLM providers (all optional — install what you use)
+anthropic>=0.25.0
+
+# Database / memory
+# chromadb>=0.4.0          # uncomment for vector memory
+# sentence-transformers>=2.7.0   # uncomment for embeddings
+
+# Utilities
+python-dotenv>=1.0.0

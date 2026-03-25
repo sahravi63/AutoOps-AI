@@ -113,6 +113,43 @@ def _adapt_parameters(tool_name: str, action: str, params: Dict[str, Any], metho
     return adapted
 
 
+def _resolve_value(v: Any, step_outputs: Dict[int, Dict[str, Any]]) -> Any:
+    """Recursively resolve ${stepN.key} placeholders in any value type."""
+    import re as _re
+    if isinstance(v, str):
+        # Full-value placeholder: "${step2.invoice_id}"
+        m = _re.fullmatch(r"\$\{step(\d+)\.([^}]+)\}", v)
+        if m:
+            src_step = int(m.group(1))
+            field    = m.group(2)
+            src_out  = step_outputs.get(src_step, {})
+            result   = src_out.get(field, v)
+            if result != v:
+                logger.info(f"[ExecutorAgent] Resolved placeholder '{v}' → '{result}'")
+            return result
+        # Inline placeholder inside a larger string: "Order ${step1.order_id} ready"
+        def _sub(match):
+            src_step = int(match.group(1))
+            field    = match.group(2)
+            return str(step_outputs.get(src_step, {}).get(field, match.group(0)))
+        return _re.sub(r"\$\{step(\d+)\.([^}]+)\}", _sub, v)
+    elif isinstance(v, dict):
+        return {dk: _resolve_value(dv, step_outputs) for dk, dv in v.items()}
+    elif isinstance(v, list):
+        return [_resolve_value(item, step_outputs) for item in v]
+    return v
+
+
+def resolve_placeholders(params: Dict[str, Any], step_outputs: Dict[int, Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Resolve ${stepN.key} placeholders in a parameters dict using previous step outputs.
+    Handles nested dicts, lists, and inline substitutions inside strings.
+    e.g. {"invoice_id": "${step2.invoice_id}"} → {"invoice_id": "INV-ABC123"}
+         {"note": "Order ${step1.order_id} processed"} → {"note": "Order ORD-5487 processed"}
+    """
+    return {k: _resolve_value(v, step_outputs) for k, v in params.items()}
+
+
 class ExecutorAgent:
     def __init__(self):
         self._instances: Dict[str, Any] = {}
@@ -180,25 +217,26 @@ class ExecutorAgent:
     async def execute_plan(self, plan: Dict[str, Any]) -> List[AgentStep]:
         steps_config = plan.get("steps", [])
         results: List[AgentStep] = []
+        step_outputs: Dict[int, Dict[str, Any]] = {}
 
         for cfg in steps_config:
+            resolved_params = resolve_placeholders(cfg.get("parameters", {}), step_outputs)
+
             step = AgentStep(
                 step_number=cfg.get("step_number", len(results) + 1),
                 agent=cfg.get("agent", "executor"),
                 tool=cfg.get("tool", ""),
                 action=cfg.get("action", "execute"),
-                input_data={"parameters": cfg.get("parameters", {})},
+                input_data={"parameters": resolved_params},
             )
 
             await asyncio.sleep(0.3)
             step = await self.execute_step(step)
             results.append(step)
+            step_outputs[step.step_number] = step.output_data or {}
 
-            # Stop on critical failure (risk=high)
             if step.status == "failed" and plan.get("risk_level") == "high":
-                logger.warning(
-                    "[ExecutorAgent] High-risk step failed — halting execution"
-                )
+                logger.warning("[ExecutorAgent] High-risk step failed — halting execution")
                 break
 
         return results

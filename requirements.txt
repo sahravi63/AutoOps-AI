@@ -9,3 +9,8 @@ python-multipart==0.0.9
 anthropic
 pydantic-settings
 streamlit>=1.35.0
+chromadb
+sentence-transformers
+pdfplumber
+pypdf
+python-docx
