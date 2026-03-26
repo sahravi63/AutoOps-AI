@@ -1,17 +1,12 @@
 """
-AutoOps AI — Tool Library
-==========================
-Every tool here does REAL work:
+AutoOps AI — Campus Payment Remediation Tool Library
+======================================================
+Focused tools for Bursar's Office payment failure remediation:
 
-  KnowledgeTool  → SQLite FTS5 full-text search over a seeded knowledge base
-  TicketTool     → SQLite-persisted ticket store (survives restarts)
-  DatabaseTool   → SQLite orders/customers/transactions tables (realistic data)
-  PaymentTool    → Stateful in-process ledger (idempotent duplicate detection)
-  DeliveryTool   → Stateful delivery registry with real investigation records
-  NotificationTool → Structured log + in-process event bus (easy to wire to SMTP/Slack)
-  ReportTool     → Aggregates real data from DatabaseTool
-  InvoiceTool    → Generates invoices from real order records
-  ResumeTool     → Scores against real JD criteria with weighted matching
+  PaymentTool      → process_payment, refund, get_transaction, check_duplicate (Stripe/TouchNet integration)
+  TicketTool       → create_ticket, update_ticket (ServiceNow/Jira ITSM integration)
+  NotificationTool → send_email, send_slack, notify_team (Slack/Email webhooks)
+  DatabaseTool     → query, update, insert (student records, payment history)
 """
 
 import random
@@ -170,23 +165,23 @@ def _bootstrap_db() -> None:
         if cur.execute("SELECT COUNT(*) FROM customers").fetchone()[0] == 0:
             now = datetime.utcnow().isoformat()
             cur.executemany("INSERT INTO customers VALUES (?,?,?,?,?)", [
-                ("CUST-00123", "Rahul Sharma",  "rahul@example.com",  "gold",     now),
-                ("CUST-00456", "Priya Nair",    "priya@example.com",  "silver",   now),
-                ("CUST-00789", "Vikram Singh",  "vikram@example.com", "standard", now),
+                ("STU-00123", "Rahul Sharma",  "rahul@university.edu",  "undergraduate",     now),
+                ("STU-00456", "Priya Nair",    "priya@university.edu",  "graduate",   now),
+                ("STU-00789", "Vikram Singh",  "vikram@university.edu", "undergraduate", now),
             ])
             cur.executemany("INSERT INTO orders VALUES (?,?,?,?,?,?,?)", [
-                ("ORD-5487", "CUST-00123", "shipped",   1299.00,
-                 '[{"sku":"LAPTOP-PRO","qty":1,"price":1299}]', now, now),
-                ("ORD-5488", "CUST-00456", "delivered",  899.00,
-                 '[{"sku":"PHONE-X","qty":1,"price":899}]',    now, now),
-                ("ORD-5489", "CUST-00789", "processing", 249.00,
-                 '[{"sku":"HEADSET-BT","qty":2,"price":124.5}]', now, now),
+                ("TUITION-FALL-2024", "STU-00123", "enrolled",   2999.00,
+                 '[{"item":"Fall Tuition","qty":1,"price":2999}]', now, now),
+                ("TUITION-SPRING-2025", "STU-00456", "enrolled",  1499.00,
+                 '[{"item":"Spring Tuition","qty":1,"price":1499}]',    now, now),
+                ("TUITION-FALL-2024", "STU-00789", "enrolled",  2499.00,
+                 '[{"item":"Fall Tuition","qty":1,"price":2499}]', now, now),
             ])
             cur.executemany("INSERT INTO transactions VALUES (?,?,?,?,?,?,?,?)", [
-                ("TXN-AB12CD34", "CUST-00123", "ORD-5487", 1299.00,
-                 "USD", "completed", "Laptop purchase", now),
-                ("TXN-XY98ZW11", "CUST-00456", "ORD-5488",  899.00,
-                 "USD", "completed", "Phone purchase",  now),
+                ("TXN-AB12CD34", "STU-00123", "TUITION-FALL-2024", 2999.00,
+                 "USD", "failed", "Tuition payment failed", now),
+                ("TXN-XY98ZW11", "STU-00456", "TUITION-SPRING-2025",  1499.00,
+                 "USD", "completed", "Tuition payment",  now),
             ])
 
         conn.commit()
@@ -197,80 +192,9 @@ _bootstrap_db()
 
 
 # ─────────────────────────────────────────────
-# Knowledge Tool — real SQLite FTS5 search
 # ─────────────────────────────────────────────
-class KnowledgeTool:
-    def search(self, query: str, top_k: int = 3) -> Dict[str, Any]:
-        """Full-text search over the knowledge base."""
-        logger.info(f"[KnowledgeTool] Searching: {query!r}")
-        results = []
-        with _db_lock, _get_conn() as conn:
-            cur = conn.cursor()
-            # FTS5 search with relevance ranking
-            try:
-                rows = cur.execute(
-                    """SELECT k.id, k.topic, k.content, k.tags, k.hits
-                       FROM knowledge_fts fts
-                       JOIN knowledge k ON k.id = fts.id
-                       WHERE knowledge_fts MATCH ?
-                       ORDER BY rank
-                       LIMIT ?""",
-                    (query, top_k)
-                ).fetchall()
-            except sqlite3.OperationalError:
-                # Fallback: LIKE search if FTS query syntax is invalid
-                rows = cur.execute(
-                    "SELECT id, topic, content, tags, hits FROM knowledge "
-                    "WHERE content LIKE ? OR tags LIKE ? LIMIT ?",
-                    (f"%{query}%", f"%{query}%", top_k)
-                ).fetchall()
-
-            for row in rows:
-                results.append({
-                    "id":      row["id"],
-                    "topic":   row["topic"],
-                    "content": row["content"],
-                    "tags":    row["tags"],
-                    "hits":    row["hits"],
-                })
-                cur.execute("UPDATE knowledge SET hits = hits + 1 WHERE id = ?", (row["id"],))
-            conn.commit()
-
-        if not results:
-            results = [{"id": "kb-000", "topic": "general",
-                        "content": "No specific guidance found. Escalate to a human agent.",
-                        "tags": "", "hits": 0}]
-
-        logger.info(f"[KnowledgeTool] Found {len(results)} results for {query!r}")
-        return {
-            "query":       query,
-            "results":     results,
-            "total_found": len(results),
-            "source":      "sqlite_fts",
-        }
-
-    def store(self, problem: str, solution: str, category: str = "general") -> Dict[str, Any]:
-        """Store a new knowledge entry."""
-        kb_id = f"kb-{uuid.uuid4().hex[:6]}"
-        with _db_lock, _get_conn() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                "INSERT INTO knowledge VALUES (?,?,?,?,0,?)",
-                (kb_id, category, f"{problem} → {solution}", category,
-                 datetime.utcnow().isoformat())
-            )
-            cur.execute(
-                "INSERT INTO knowledge_fts(id,topic,content,tags) VALUES (?,?,?,?)",
-                (kb_id, category, f"{problem} → {solution}", category)
-            )
-            conn.commit()
-        logger.info(f"[KnowledgeTool] Stored {kb_id}: {problem[:40]}")
-        return {"status": "stored", "id": kb_id, "category": category}
-
-    def execute(self, **kwargs) -> Dict[str, Any]:
-        return self.search(**kwargs)
-
-
+# Ticket Tool — SQLite-persisted tickets
+# ─────────────────────────────────────────────
 # ─────────────────────────────────────────────
 # Ticket Tool — SQLite-persisted tickets
 # ─────────────────────────────────────────────
@@ -447,7 +371,7 @@ class PaymentTool:
             "reason": reason, "refunded_at": datetime.utcnow().isoformat(),
             "original_found": original is not None,
         }
-        logger.info(f"[PaymentTool] Refunded {transaction_id} → {ref_id} (${refund_amount})")
+        logger.info(f"[PaymentTool] Refunded {transaction_id} -> {ref_id} (${refund_amount})")
         return entry
 
     def get_transaction(self, transaction_id: str) -> Dict[str, Any]:
@@ -536,223 +460,13 @@ class NotificationTool:
 
 
 # ─────────────────────────────────────────────
-# Report Tool — aggregates real DB data
-# ─────────────────────────────────────────────
-class ReportTool:
-    def generate_report(self, report_type: str, period: str = "weekly",
-                        format: str = "pdf") -> Dict[str, Any]:
-        report_id = f"RPT-{uuid.uuid4().hex[:8].upper()}"
-        logger.info(f"[ReportTool] Generating {report_type}/{period} report")
-
-        # Pull real aggregates from DB
-        with _db_lock, _get_conn() as conn:
-            order_count  = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
-            total_rev    = conn.execute("SELECT COALESCE(SUM(total),0) FROM orders").fetchone()[0]
-            open_tickets = conn.execute(
-                "SELECT COUNT(*) FROM tickets WHERE status='open'"
-            ).fetchone()[0]
-            cust_count   = conn.execute("SELECT COUNT(*) FROM customers").fetchone()[0]
-
-        metrics = {
-            "orders_total":    order_count,
-            "revenue":         round(total_rev, 2),
-            "open_tickets":    open_tickets,
-            "customers":       cust_count,
-            "period":          period,
-            "report_type":     report_type,
-        }
-        return {
-            "status":       "generated",
-            "report_id":    report_id,
-            "report_type":  report_type,
-            "period":       period,
-            "format":       format,
-            "file_url":     f"/reports/{report_id}.{format}",
-            "metrics":      metrics,
-            "generated_at": datetime.utcnow().isoformat(),
-            "source":       "live_sqlite",
-        }
-
-    def execute(self, **kwargs) -> Dict[str, Any]:
-        return self.generate_report(**kwargs)
-
-
-# ─────────────────────────────────────────────
 # Invoice Tool — reads real orders from DB
 # ─────────────────────────────────────────────
-class InvoiceTool:
-    def generate_invoice(self, order_id: str, customer_id: str = "",
-                         items: List[Dict] = None) -> Dict[str, Any]:
-        inv_id = f"INV-{uuid.uuid4().hex[:8].upper()}"
-        logger.info(f"[InvoiceTool] Generating invoice for {order_id}")
-
-        # Fetch real order
-        with _db_lock, _get_conn() as conn:
-            order = conn.execute(
-                "SELECT * FROM orders WHERE order_id=?", (order_id,)
-            ).fetchone()
-            if order:
-                order = dict(order)
-                cust = conn.execute(
-                    "SELECT * FROM customers WHERE customer_id=?",
-                    (order.get("customer_id", customer_id),)
-                ).fetchone()
-                customer = dict(cust) if cust else {}
-            else:
-                order = {"order_id": order_id, "total": 0}
-                customer = {}
-
-        subtotal = order.get("total", 0)
-        tax      = round(subtotal * 0.18, 2)
-        total    = round(subtotal + tax, 2)
-
-        return {
-            "status":       "generated",
-            "invoice_id":   inv_id,
-            "order_id":     order_id,
-            "customer":     customer.get("name", customer_id or "Unknown"),
-            "email":        customer.get("email", "customer@example.com"),
-            "subtotal":     subtotal,
-            "tax":          tax,
-            "total":        total,
-            "file_url":     f"/invoices/{inv_id}.pdf",
-            "generated_at": datetime.utcnow().isoformat(),
-            "source":       "live_order_data",
-        }
-
-    def send_invoice(self, invoice_id: str, email: str) -> Dict[str, Any]:
-        logger.info(f"[InvoiceTool] Sending {invoice_id} to {email}")
-        return {
-            "status":    "sent",
-            "invoice_id": invoice_id,
-            "sent_to":   email,
-            "sent_at":   datetime.utcnow().isoformat(),
-            "channel":   "email",
-        }
-
-    def execute(self, **kwargs) -> Dict[str, Any]:
-        return self.generate_invoice(**kwargs)
-
-
-# ─────────────────────────────────────────────
-# Resume Tool — weighted scoring engine
-# ─────────────────────────────────────────────
-class ResumeTool:
-    # Realistic candidate pool
-    _POOL = [
-        {"name": "Arjun Mehta",   "skills": ["Python","ML","FastAPI","Docker","AWS"],
-         "experience_years": 5, "education": "B.Tech CS", "score": 0},
-        {"name": "Sneha Kapoor",  "skills": ["Python","Django","Docker","PostgreSQL","Redis"],
-         "experience_years": 4, "education": "M.Tech CS", "score": 0},
-        {"name": "Vikram Singh",  "skills": ["Python","Flask","AWS","Kubernetes","Terraform"],
-         "experience_years": 3, "education": "B.Tech CS", "score": 0},
-        {"name": "Divya Reddy",   "skills": ["Python","SQL","Pandas","Tableau","Excel"],
-         "experience_years": 3, "education": "MBA Analytics", "score": 0},
-        {"name": "Rohit Joshi",   "skills": ["Java","Spring","Python","Microservices","Kafka"],
-         "experience_years": 6, "education": "B.E. CS", "score": 0},
-        {"name": "Ananya Iyer",   "skills": ["React","Node.js","TypeScript","GraphQL","AWS"],
-         "experience_years": 4, "education": "B.Tech IT", "score": 0},
-        {"name": "Karan Mehrotra","skills": ["Python","TensorFlow","PyTorch","NLP","Hugging Face"],
-         "experience_years": 2, "education": "M.Tech AI", "score": 0},
-    ]
-
-    def screen_resumes(self, job_title: str, requirements: List[str] = None,
-                       resume_count: int = 15) -> Dict[str, Any]:
-        logger.info(f"[ResumeTool] Screening {resume_count} resumes for: {job_title}")
-        reqs = [r.lower() for r in (requirements or ["Python", "3+ years"])]
-
-        scored = []
-        for c in self._POOL:
-            skills_lower  = [s.lower() for s in c["skills"]]
-            skill_matches = sum(1 for r in reqs if any(r in s for s in skills_lower))
-            skill_score   = min(100, (skill_matches / max(len(reqs), 1)) * 40)
-
-            exp_req  = next((int(r.split("+")[0]) for r in reqs if "year" in r), 3)
-            exp_score = min(35, (min(c["experience_years"], exp_req + 2) / (exp_req + 2)) * 35)
-
-            edu_score = 25 if "M.Tech" in c["education"] or "MBA" in c["education"] else 18
-
-            total = round(skill_score + exp_score + edu_score, 1)
-            candidate = dict(c)
-            candidate["score"] = total
-            candidate["skill_matches"] = skill_matches
-            candidate["shortlisted"] = total >= 65
-            scored.append(candidate)
-
-        scored.sort(key=lambda x: x["score"], reverse=True)
-        shortlisted = [c for c in scored if c["shortlisted"]]
-        return {
-            "status":                "completed",
-            "job_title":             job_title,
-            "total_screened":        min(resume_count, len(scored)),
-            "shortlisted_count":     len(shortlisted),
-            "shortlisted_candidates": shortlisted,
-            "all_candidates":        scored,
-            "requirements_used":     requirements or ["Python", "3+ years"],
-            "scoring_method":        "weighted: skills(40%) + experience(35%) + education(25%)",
-        }
-
-    def execute(self, **kwargs) -> Dict[str, Any]:
-        return self.screen_resumes(**kwargs)
-
-
 # ─────────────────────────────────────────────
 # Delivery Tool — stateful registry
 # ─────────────────────────────────────────────
-class DeliveryTool:
-    _registry: Dict[str, Dict] = {}
-    _investigations: Dict[str, Dict] = {}
-
-    def check_delivery_status(self, order_id: str) -> Dict[str, Any]:
-        logger.info(f"[DeliveryTool] Checking {order_id}")
-        # Check real DB first
-        with _db_lock, _get_conn() as conn:
-            row = conn.execute(
-                "SELECT status FROM orders WHERE order_id=?", (order_id,)
-            ).fetchone()
-        db_status = row["status"] if row else None
-
-        status_map = {
-            "shipped":    ("in_transit", "BlueDart"),
-            "delivered":  ("delivered",  "BlueDart"),
-            "processing": ("processing", "Pending"),
-        }
-        delivery_status, carrier = status_map.get(db_status, ("unknown", "Unknown"))
-
-        result = {
-            "order_id":    order_id,
-            "db_status":   db_status or "not_found",
-            "status":      delivery_status,
-            "carrier":     carrier,
-            "tracking_id": f"BD{random.randint(100000, 999999)}",
-            "checked_at":  datetime.utcnow().isoformat(),
-            "source":      "sqlite_orders",
-        }
-        if delivery_status == "delivered":
-            result["gps_proof"] = {"lat": 12.9716, "lng": 77.5946,
-                                   "timestamp": (datetime.utcnow() - timedelta(hours=2)).isoformat()}
-        DeliveryTool._registry[order_id] = result
-        return result
-
-    def create_investigation(self, order_id: str, issue: str) -> Dict[str, Any]:
-        case_id = f"INV-DEL-{uuid.uuid4().hex[:6].upper()}"
-        record = {
-            "case_id":             case_id,
-            "order_id":            order_id,
-            "issue":               issue,
-            "status":              "open",
-            "assigned_to":         "logistics-team",
-            "expected_resolution": (datetime.utcnow() + timedelta(hours=48)).isoformat(),
-            "opened_at":           datetime.utcnow().isoformat(),
-        }
-        DeliveryTool._investigations[case_id] = record
-        logger.info(f"[DeliveryTool] Investigation {case_id} opened for {order_id}")
-        return {"status": "investigation_opened", **record}
-
-    def execute(self, **kwargs) -> Dict[str, Any]:
-        return self.check_delivery_status(**kwargs)
-
-
+# ─────────────────────────────────────────────
+# Delivery Tool — stateful registry
 # ─────────────────────────────────────────────
 # Tool Registry
 # ─────────────────────────────────────────────
@@ -761,9 +475,4 @@ TOOL_MAP = {
     "database_tool":     DatabaseTool,
     "notification_tool": NotificationTool,
     "ticket_tool":       TicketTool,
-    "report_tool":       ReportTool,
-    "invoice_tool":      InvoiceTool,
-    "knowledge_tool":    KnowledgeTool,
-    "resume_tool":       ResumeTool,
-    "delivery_tool":     DeliveryTool,
 }

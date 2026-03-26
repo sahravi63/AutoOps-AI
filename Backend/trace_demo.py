@@ -35,19 +35,21 @@ except ImportError:
 
 DEMO_TASKS = [
     {
-        "name": "Payment Failure",
-        "task": "Customer payment failed but money was deducted from their account. Customer ID: CUST-00123, amount Rs.2999.",
-        "context": {"customer_id": "CUST-00123", "amount": 2999, "currency": "INR"},
+        "name": "Tuition Payment Failed",
+        "task": "Student payment failed but tuition fee was deducted. Student ID: STU-00123, amount $2999.",
+        "context": {"student_id": "STU-00123", "amount": 2999, "currency": "USD"},
     },
     {
-        "name": "HR Resume Screening",
-        "task": "Screen resumes for Senior Python Developer position. We need at least 3 years of Python experience and FastAPI knowledge.",
-        "context": {"job_title": "Senior Python Developer", "min_experience": 3},
+        "name": "Duplicate Tuition Charge",
+        "task": "Student STU-00456 was charged twice for $1499 tuition payment.",
+        "context": {"student_id": "STU-00456", "amount": 1499},
     },
     {
-        "name": "Sales Report Generation",
-        "task": "Generate weekly sales operations report for Q1 2026 and notify the management team.",
-        "context": {"period": "weekly", "quarter": "Q1-2026"},
+        "name": "Bursar Refund Request",
+        "task": "Process refund for failed tuition payment TXN-AB12CD34.",
+        "context": {"transaction_id": "TXN-AB12CD34", "reason": "Payment gateway failure"},
+    },
+]
     },
 ]
 

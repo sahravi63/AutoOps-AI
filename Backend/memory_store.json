@@ -1,0 +1,45 @@
+[
+  {
+    "id": "mem-001",
+    "category": "payment",
+    "problem": "Customer payment failed but money was deducted",
+    "solution": "Check transaction in gateway \u2192 verify deduction \u2192 initiate refund \u2192 create ticket \u2192 notify customer",
+    "timestamp": "2026-01-10T09:00:00Z",
+    "success_count": 23
+  },
+  {
+    "id": "mem-002",
+    "category": "delivery",
+    "problem": "Order shows delivered but customer hasn't received",
+    "solution": "Check GPS proof \u2192 contact courier API \u2192 if unverified \u2192 reship or refund within 24h",
+    "timestamp": "2026-02-05T14:30:00Z",
+    "success_count": 15
+  },
+  {
+    "id": "mem-003",
+    "category": "payment",
+    "problem": "Customer payment failed but money was deducted. Customer ID: CUST-00123, amount Rs.2999.",
+    "solution": "Successfully completed payment workflow: Customer payment failed but money was deducted. Customer ID: CUST-00123, amount ",
+    "workflow_id": "",
+    "timestamp": "2026-03-25T17:37:02.348268",
+    "success_count": 1
+  },
+  {
+    "id": "mem-004",
+    "category": "invoice",
+    "problem": "Generate invoice for order ORD-5487 and email to customer.",
+    "solution": "Successfully completed invoice workflow: Generate invoice for order ORD-5487 and email to customer.",
+    "workflow_id": "",
+    "timestamp": "2026-03-25T17:45:13.629050",
+    "success_count": 1
+  },
+  {
+    "id": "mem-005",
+    "category": "payment_failure_remediation",
+    "problem": "Customer payment failed but money was deducted. Customer ID: CUST-00123, amount Rs.2999.",
+    "solution": "Successfully completed payment_failure_remediation workflow: Customer payment failed but money was deducted. Customer ID: CUST-00123, amount ",
+    "workflow_id": "",
+    "timestamp": "2026-03-26T17:12:59.027163",
+    "success_count": 1
+  }
+]

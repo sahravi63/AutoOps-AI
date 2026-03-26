@@ -14,3 +14,4 @@ sentence-transformers
 pdfplumber
 pypdf
 python-docx
+slowapi>=0.1.9

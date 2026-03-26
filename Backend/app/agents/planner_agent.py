@@ -24,27 +24,22 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-PLANNER_SYSTEM = """You are the Planner Agent in AutoOps AI — an autonomous operations management system.
-Analyse the user's task and produce a precise execution plan.
+PLANNER_SYSTEM = """You are the Planner Agent in AutoOps AI — an autonomous campus payment failure remediation system for the Bursar's Office.
+Analyse the user's task and produce a precise execution plan for payment failure remediation.
 
 Available tools:
 - payment_tool     → process_payment, refund, get_transaction, check_duplicate
-- database_tool    → query, update, insert
+- database_tool    → query, update, insert (student records, payments)
 - notification_tool → send_email, send_slack, notify_team
-- ticket_tool      → create_ticket, update_ticket
-- report_tool      → generate_report
-- invoice_tool     → generate_invoice, send_invoice
-- knowledge_tool   → search, store
-- resume_tool      → screen_resumes
-- delivery_tool    → check_delivery_status, create_investigation
+- ticket_tool      → create_ticket, update_ticket (ITSM for remediation tracking)
 
-If feedback from a previous attempt is provided, revise the plan to address
-those specific issues before repeating the same steps.
+Focus on campus payment failure scenarios: failed tuition payments, chargebacks, duplicate charges, etc.
+If feedback from a previous attempt is provided, revise the plan to address those specific issues.
 
 Respond ONLY with valid JSON (no markdown fences):
 {
   "task_summary": "Brief description",
-  "workflow_type": "payment|delivery|invoice|report|resume|incident|general",
+  "workflow_type": "payment_failure_remediation",
   "steps": [
     {
       "step_number": 1,
@@ -73,30 +68,13 @@ Respond ONLY with valid JSON (no markdown fences):
 
 _WORKFLOW_SIGNALS: List[tuple] = [
     # (workflow_type,  keyword list)
-    ("refund",        ["refund", "chargeback", "money back", "overcharged"]),
-    ("duplicate",     ["duplicate", "charged twice", "double charge"]),
-    ("payment",       ["pay", "payment", "transaction", "charge", "invoice", "billing"]),
-    ("delivery",      ["deliver", "shipment", "track", "order", "shipping", "courier"]),
-    ("report",        ["report", "summary", "analytics", "dashboard", "metrics", "kpi"]),
-    ("resume",        ["resume", "cv", "candidate", "hire", "recruit", "screening", "job"]),
-    ("incident",      ["incident", "outage", "down", "crash", "error", "bug", "issue", "ticket"]),
-    ("database",      ["database", "db", "query", "table", "record", "data", "sql"]),
-    ("email",         ["email", "send mail", "notify", "alert", "message"]),
-    ("invoice",       ["invoice", "bill", "billing", "generate invoice", "send invoice"]),
+    ("payment_failure_remediation", ["payment failure", "tuition payment failed", "failed payment", "chargeback", "refund", "duplicate charge", "payment error", "bursar", "tuition", "student payment"]),
 ]
 
 
 def _infer_workflow_type(task: str) -> str:
-    """Score the task against every signal group; return the highest-scoring type."""
-    task_lower = task.lower()
-    scores: Dict[str, int] = {}
-    for workflow_type, keywords in _WORKFLOW_SIGNALS:
-        score = sum(1 for kw in keywords if kw in task_lower)
-        if score:
-            scores[workflow_type] = scores.get(workflow_type, 0) + score
-    if not scores:
-        return "general"
-    return max(scores, key=lambda k: scores[k])
+    """Always return payment_failure_remediation for campus focus."""
+    return "payment_failure_remediation"
 
 
 def _extract_context(task: str) -> Dict[str, Any]:
@@ -159,17 +137,17 @@ def _db_query(sql: str, params: tuple):
 
 
 def _resolve_transaction_id(ctx: Dict[str, Any]) -> str:
-    """Return a real txn_id from context, DB lookup by customer, or sentinel."""
+    """Return a real txn_id from context, DB lookup by student, or sentinel."""
     if ctx.get("transaction_id"):
         return ctx["transaction_id"]
-    customer_id = ctx.get("customer_id")
-    if customer_id:
+    student_id = ctx.get("student_id") or ctx.get("customer_id")  # backward compatibility
+    if student_id:
         row = _db_query(
             "SELECT txn_id FROM transactions WHERE customer_id=? ORDER BY created_at DESC LIMIT 1",
-            (customer_id,)
+            (student_id,)
         )
         if row:
-            logger.info(f"[MockPlanner] Resolved transaction_id={row['txn_id']} for customer={customer_id}")
+            logger.info(f"[MockPlanner] Resolved transaction_id={row['txn_id']} for student={student_id}")
             return row["txn_id"]
     return "TXN-UNKNOWN"
 
@@ -191,9 +169,9 @@ def _resolve_order_id(ctx: Dict[str, Any]) -> str:
 
 
 def _resolve_customer_id(ctx: Dict[str, Any]) -> str:
-    """Return a real customer_id from context, DB lookup by order/txn, or sentinel."""
-    if ctx.get("customer_id"):
-        return ctx["customer_id"]
+    """Return a real student_id from context, DB lookup by order/txn, or sentinel."""
+    if ctx.get("student_id") or ctx.get("customer_id"):
+        return ctx.get("student_id") or ctx["customer_id"]
     order_id = ctx.get("order_id")
     if order_id:
         row = _db_query(
@@ -201,7 +179,7 @@ def _resolve_customer_id(ctx: Dict[str, Any]) -> str:
             (order_id,)
         )
         if row:
-            logger.info(f"[MockPlanner] Resolved customer_id={row['customer_id']} for order={order_id}")
+            logger.info(f"[MockPlanner] Resolved student_id={row['customer_id']} for order={order_id}")
             return row["customer_id"]
     txn_id = ctx.get("transaction_id")
     if txn_id:
@@ -210,446 +188,143 @@ def _resolve_customer_id(ctx: Dict[str, Any]) -> str:
             (txn_id,)
         )
         if row:
-            logger.info(f"[MockPlanner] Resolved customer_id={row['customer_id']} for txn={txn_id}")
+            logger.info(f"[MockPlanner] Resolved student_id={row['customer_id']} for txn={txn_id}")
             return row["customer_id"]
-    return "CUST-UNKNOWN"
+    return "STU-UNKNOWN"
 
 
 def _resolve_customer_email(ctx: Dict[str, Any]) -> str:
-    """Return a real customer email from DB, or a safe default."""
-    customer_id = _resolve_customer_id(ctx)
-    if not customer_id.endswith("UNKNOWN"):
+    """Return a real student email from DB, or a safe default."""
+    student_id = _resolve_customer_id(ctx)
+    if not student_id.endswith("UNKNOWN"):
         row = _db_query(
             "SELECT email FROM customers WHERE customer_id=? LIMIT 1",
-            (customer_id,)
+            (student_id,)
         )
         if row and row["email"]:
-            logger.info(f"[MockPlanner] Resolved email={row['email']} for customer={customer_id}")
+            logger.info(f"[MockPlanner] Resolved email={row['email']} for student={student_id}")
             return row["email"]
-    return "customer@example.com"
+    return "student@university.edu"
+
+
+def _mock_plan(task: str, feedback: str = "", memory_hints: list = None) -> Dict[str, Any]:
+    """
+    Intelligent rule-based planner used when no API key is configured.
+
+    Detects workflow type via keyword scoring, extracts structured context
+    (IDs, amounts, priority) from the task text, then builds a multi-step
+    plan whose steps and parameters are specific to what the task actually
+    asks for.  When memory_hints are provided, logs and potentially adjusts
+    the priority/risk based on past failure patterns.
+    """
+    workflow_type = _infer_workflow_type(task)
+    ctx           = _extract_context(task)
+
+    # ── Apply memory hints to adjust planning context ────────────────────
+    if memory_hints:
+        for hint in memory_hints[:2]:
+            doc = hint.get("document", "").lower()
+            # If a past workflow of this type failed, bump risk
+            if "failed" in doc and workflow_type in doc:
+                logger.info(f"[MockPlanner] Memory hint suggests prior failure for '{workflow_type}' — bumping risk")
+                ctx["_memory_risk_bump"] = True
+            # If a past solution mentions a specific action sequence, log it
+            if "solution:" in doc:
+                logger.info(f"[MockPlanner] Memory hint solution: {doc[doc.find('solution:')+9:][:80]}")
+
+    steps = _build_steps(workflow_type, task, ctx)
+
+    # Risk: high if urgency extracted OR workflow is payment/incident
+    risk = "high"   if ctx.get("priority") == "high" or workflow_type in ("incident", "refund", "duplicate") \
+          else "medium" if workflow_type in ("payment", "delivery", "invoice") \
+          else "low"
+
+    logger.info(
+        f"[MockPlanner] type={workflow_type} | steps={len(steps)} | "
+        f"risk={risk} | ctx_keys={list(ctx.keys())}"
+    )
+
+    return {
+        "task_summary":               f"[MOCK] {task[:80]}",
+        "workflow_type":              workflow_type,
+        "steps":                      steps,
+        "estimated_duration_seconds": len(steps) * 5,
+        "risk_level":                 risk,
+        "retry_reason":               feedback or "",
+        "mode":                       "mock",
+        "extracted_context":          ctx,   # visible in logs / review
+    }
 
 
 def _build_steps(workflow_type: str, task: str, ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    Return a task-specific, multi-step plan whose steps reflect what the task
-    actually asks for — not just a generic 2-step template.
+    Return a focused plan for campus payment failure remediation.
     """
     priority   = ctx.get("priority", "medium")
     urgency    = "high" if priority == "high" else "normal"
     short_task = task[:70]
 
-    # ── REFUND ───────────────────────────────────────────────────────────────
-    if workflow_type == "refund":
+    # ── PAYMENT FAILURE REMEDIATION ──────────────────────────────────────────
+    if workflow_type == "payment_failure_remediation":
         txn_id = _resolve_transaction_id(ctx)
         amount = ctx.get("amount")
+        student_id = _resolve_customer_id(ctx)  # Treat as student_id
         return [
             {
                 "step_number": 1, "agent": "executor",
                 "tool": "payment_tool", "action": "get_transaction",
-                "description": f"Fetch original transaction to verify refund eligibility",
+                "description": "Verify payment failure and transaction details",
                 "parameters": {"transaction_id": txn_id},
                 "depends_on": [],
             },
             {
                 "step_number": 2, "agent": "executor",
                 "tool": "payment_tool", "action": "refund",
-                "description": "Initiate refund for the transaction",
+                "description": "Process refund for failed tuition payment",
                 "parameters": {
                     "transaction_id": txn_id,
                     "amount": amount,
-                    "reason": f"Customer request: {short_task}",
+                    "reason": f"Payment failure remediation: {short_task}",
                 },
                 "depends_on": [1],
             },
             {
                 "step_number": 3, "agent": "executor",
-                "tool": "notification_tool", "action": "notify_team",
-                "description": "Notify finance team of refund",
-                "parameters": {
-                    "team": "finance",
-                    "message": f"Refund processed for {txn_id}: {short_task}",
-                    "urgency": urgency,
-                },
-                "depends_on": [2],
-            },
-        ]
-
-    # ── DUPLICATE CHARGE ─────────────────────────────────────────────────────
-    if workflow_type == "duplicate":
-        customer_id = _resolve_customer_id(ctx)
-        amount      = ctx.get("amount", 0.0)
-        txn_id      = _resolve_transaction_id(ctx)
-        email       = _resolve_customer_email(ctx)
-        return [
-            {
-                "step_number": 1, "agent": "executor",
-                "tool": "payment_tool", "action": "check_duplicate",
-                "description": "Detect duplicate charge for the customer",
-                "parameters": {"customer_id": customer_id, "amount": amount},
-                "depends_on": [],
-            },
-            {
-                "step_number": 2, "agent": "executor",
-                "tool": "payment_tool", "action": "refund",
-                "description": "Refund the duplicate transaction",
-                "parameters": {
-                    "transaction_id": txn_id,
-                    "reason": "Duplicate charge detected",
-                },
-                "depends_on": [1],
-            },
-            {
-                "step_number": 3, "agent": "executor",
-                "tool": "notification_tool", "action": "send_email",
-                "description": "Email customer confirmation of duplicate refund",
-                "parameters": {
-                    "to": email,
-                    "subject": "Duplicate Charge Refunded",
-                    "body": f"We've refunded your duplicate charge. Task: {short_task}",
-                },
-                "depends_on": [2],
-            },
-        ]
-
-    # ── PAYMENT (generic — check status / process) ────────────────────────────
-    if workflow_type == "payment":
-        txn_id = _resolve_transaction_id(ctx)
-        return [
-            {
-                "step_number": 1, "agent": "executor",
-                "tool": "payment_tool", "action": "get_transaction",
-                "description": "Retrieve payment transaction details",
-                "parameters": {"transaction_id": txn_id},
-                "depends_on": [],
-            },
-            {
-                "step_number": 2, "agent": "executor",
-                "tool": "database_tool", "action": "query",
-                "description": "Cross-check transaction in orders database",
-                "parameters": {"table": "transactions", "filters": {"txn_id": txn_id}, "limit": 1},
-                "depends_on": [1],
-            },
-            {
-                "step_number": 3, "agent": "executor",
-                "tool": "notification_tool", "action": "notify_team",
-                "description": "Notify finance team of payment status",
-                "parameters": {
-                    "team": "finance",
-                    "message": f"Payment review complete for {txn_id}: {short_task}",
-                    "urgency": urgency,
-                },
-                "depends_on": [2],
-            },
-        ]
-
-    # ── DELIVERY ─────────────────────────────────────────────────────────────
-    if workflow_type == "delivery":
-        order_id = _resolve_order_id(ctx)
-        return [
-            {
-                "step_number": 1, "agent": "executor",
-                "tool": "delivery_tool", "action": "check_delivery_status",
-                "description": f"Check current delivery status for order {order_id}",
-                "parameters": {"order_id": order_id},
-                "depends_on": [],
-            },
-            {
-                "step_number": 2, "agent": "executor",
-                "tool": "database_tool", "action": "query",
-                "description": "Fetch order details from database",
-                "parameters": {"table": "orders", "filters": {"order_id": order_id}, "limit": 1},
-                "depends_on": [1],
-            },
-            {
-                "step_number": 3, "agent": "executor",
-                "tool": "delivery_tool", "action": "create_investigation",
-                "description": "Open delivery investigation if needed",
-                "parameters": {
-                    "order_id": order_id,
-                    "issue": f"Customer query: {short_task}",
-                },
-                "depends_on": [2],
-            },
-            {
-                "step_number": 4, "agent": "executor",
-                "tool": "notification_tool", "action": "notify_team",
-                "description": "Notify logistics team of investigation",
-                "parameters": {
-                    "team": "logistics",
-                    "message": f"Delivery investigation opened for {order_id}: {short_task}",
-                    "urgency": urgency,
-                },
-                "depends_on": [3],
-            },
-        ]
-
-    # ── REPORT ───────────────────────────────────────────────────────────────
-    if workflow_type == "report":
-        # Try to detect report type from task keywords
-        task_lower = task.lower()
-        if   "sales"   in task_lower: report_type = "sales"
-        elif "hr"      in task_lower: report_type = "hr"
-        elif "finance" in task_lower: report_type = "finance"
-        else:                          report_type = "operations"
-
-        period = "monthly" if "month" in task_lower else \
-                 "daily"   if "day"   in task_lower or "today" in task_lower else "weekly"
-        return [
-            {
-                "step_number": 1, "agent": "executor",
-                "tool": "database_tool", "action": "query",
-                "description": f"Pull raw {report_type} data from database",
-                "parameters": {"table": "orders", "filters": {}, "limit": 50},
-                "depends_on": [],
-            },
-            {
-                "step_number": 2, "agent": "executor",
-                "tool": "report_tool", "action": "generate_report",
-                "description": f"Generate {period} {report_type} report",
-                "parameters": {"report_type": report_type, "period": period, "format": "pdf"},
-                "depends_on": [1],
-            },
-            {
-                "step_number": 3, "agent": "executor",
-                "tool": "notification_tool", "action": "notify_team",
-                "description": "Distribute report to management",
-                "parameters": {
-                    "team": "management",
-                    "message": f"{period.title()} {report_type} report is ready: {short_task}",
-                    "urgency": urgency,
-                },
-                "depends_on": [2],
-            },
-        ]
-
-    # ── RESUME SCREENING ─────────────────────────────────────────────────────
-    if workflow_type == "resume":
-        import re
-        # Try to extract job title from task — "hire a Python engineer" → "Python engineer"
-        title_match = re.search(
-            r"(?:hire|recruit|screen|find|looking for|need)\s+(?:a\s+)?(.+?)(?:\s+for|\s+with|\.|$)",
-            task, re.IGNORECASE
-        )
-        job_title = title_match.group(1).strip() if title_match else task[:60]
-
-        # Extract skills from task
-        skill_keywords = ["python", "java", "react", "node", "aws", "docker",
-                          "kubernetes", "ml", "ai", "fastapi", "django", "sql"]
-        requirements = [kw.upper() if len(kw) <= 3 else kw.title()
-                        for kw in skill_keywords if kw in task.lower()]
-        if not requirements:
-            requirements = ["Relevant experience", "Communication skills"]
-
-        return [
-            {
-                "step_number": 1, "agent": "executor",
-                "tool": "knowledge_tool", "action": "search",
-                "description": f"Search knowledge base for {job_title} hiring criteria",
-                "parameters": {"query": f"hiring criteria {job_title}", "top_k": 3},
-                "depends_on": [],
-            },
-            {
-                "step_number": 2, "agent": "executor",
-                "tool": "resume_tool", "action": "screen_resumes",
-                "description": f"Screen resumes for {job_title}",
-                "parameters": {
-                    "job_title": job_title,
-                    "requirements": requirements,
-                    "resume_count": 20,
-                },
-                "depends_on": [1],
-            },
-            {
-                "step_number": 3, "agent": "executor",
-                "tool": "notification_tool", "action": "notify_team",
-                "description": "Notify HR team with shortlist",
-                "parameters": {
-                    "team": "hr",
-                    "message": f"Resume screening done for '{job_title}': {short_task}",
-                    "urgency": urgency,
-                },
-                "depends_on": [2],
-            },
-        ]
-
-    # ── INCIDENT / BUG / OUTAGE ───────────────────────────────────────────────
-    if workflow_type == "incident":
-        task_lower = task.lower()
-        category  = "outage"   if any(w in task_lower for w in ["down", "outage", "crash"]) else \
-                    "security" if any(w in task_lower for w in ["breach", "hack", "security"]) else \
-                    "bug"      if any(w in task_lower for w in ["bug", "error", "exception"]) else \
-                    "incident"
-        urgency_override = "high" if priority == "high" or category in ("outage", "security") \
-                           else urgency
-        return [
-            {
-                "step_number": 1, "agent": "executor",
-                "tool": "knowledge_tool", "action": "search",
-                "description": "Search knowledge base for similar incidents and runbooks",
-                "parameters": {"query": task, "top_k": 3},
-                "depends_on": [],
-            },
-            {
-                "step_number": 2, "agent": "executor",
                 "tool": "ticket_tool", "action": "create_ticket",
-                "description": f"Create {priority}-priority {category} ticket",
+                "description": "Create ITSM ticket for payment remediation tracking",
                 "parameters": {
-                    "title": short_task,
-                    "description": f"Auto-raised by AutoOps AI: {task}",
+                    "title": f"Payment Failure Remediation - {txn_id}",
+                    "description": f"Automated remediation for failed payment: {short_task}",
                     "priority": priority,
-                    "category": category,
-                    "assigned_to": "on-call-team",
-                },
-                "depends_on": [1],
-            },
-            {
-                "step_number": 3, "agent": "executor",
-                "tool": "notification_tool", "action": "notify_team",
-                "description": "Alert on-call team immediately",
-                "parameters": {
-                    "team": "ops",
-                    "message": f"[{category.upper()}] {short_task}",
-                    "urgency": urgency_override,
-                },
-                "depends_on": [2],
-            },
-        ]
-
-    # ── INVOICE ───────────────────────────────────────────────────────────────
-    if workflow_type == "invoice":
-        order_id    = _resolve_order_id(ctx)
-        customer_id = _resolve_customer_id(ctx)
-        email       = _resolve_customer_email(ctx)
-        return [
-            {
-                "step_number": 1, "agent": "executor",
-                "tool": "database_tool", "action": "query",
-                "description": "Fetch order details for invoice generation",
-                "parameters": {"table": "orders", "filters": {"order_id": order_id}, "limit": 1},
-                "depends_on": [],
-            },
-            {
-                "step_number": 2, "agent": "executor",
-                "tool": "invoice_tool", "action": "generate_invoice",
-                "description": f"Generate invoice for order {order_id}",
-                "parameters": {"order_id": order_id, "customer_id": customer_id},
-                "depends_on": [1],
-            },
-            {
-                "step_number": 3, "agent": "executor",
-                "tool": "invoice_tool", "action": "send_invoice",
-                "description": "Email invoice to customer",
-                "parameters": {
-                    # invoice_id will be resolved at runtime from Step 2 output by executor
-                    "invoice_id": f"${{step2.invoice_id}}",
-                    "email": email,
+                    "assigned_to": "bursar_team",
                 },
                 "depends_on": [2],
             },
             {
                 "step_number": 4, "agent": "executor",
                 "tool": "notification_tool", "action": "notify_team",
-                "description": "Notify finance team that invoice was sent",
+                "description": "Notify Bursar's Office of remediation completion",
                 "parameters": {
-                    "team": "finance",
-                    "message": f"Invoice sent for order {order_id}: {short_task}",
-                    "urgency": "normal",
+                    "team": "bursar",
+                    "message": f"Payment failure remediated for {txn_id}: refund processed, ticket created",
+                    "urgency": urgency,
                 },
                 "depends_on": [3],
             },
         ]
 
-    # ── DATABASE ──────────────────────────────────────────────────────────────
-    if workflow_type == "database":
-        task_lower = task.lower()
-        action = "insert" if any(w in task_lower for w in ["insert", "add", "create", "new"]) \
-            else "update"  if any(w in task_lower for w in ["update", "edit", "change", "modify"]) \
-            else "query"
-        return [
-            {
-                "step_number": 1, "agent": "executor",
-                "tool": "database_tool", "action": action,
-                "description": f"Perform database {action} operation",
-                "parameters": {
-                    "table":     "orders",
-                    "filters":   {},
-                    "limit":     10,
-                    "record_id": _resolve_order_id(ctx),
-                    "data":      {"updated_by": "autoops", "task": short_task},
-                },
-                "depends_on": [],
-            },
-            {
-                "step_number": 2, "agent": "executor",
-                "tool": "notification_tool", "action": "notify_team",
-                "description": "Notify data team of database operation",
-                "parameters": {
-                    "team": "data",
-                    "message": f"DB {action} completed: {short_task}",
-                    "urgency": "normal",
-                },
-                "depends_on": [1],
-            },
-        ]
-
-    # ── EMAIL / NOTIFICATION ──────────────────────────────────────────────────
-    if workflow_type == "email":
-        return [
-            {
-                "step_number": 1, "agent": "executor",
-                "tool": "notification_tool", "action": "send_email",
-                "description": f"Send notification email: {short_task}",
-                "parameters": {
-                    "to":      "team@company.com",
-                    "subject": f"AutoOps Notification: {short_task}",
-                    "body":    task,
-                },
-                "depends_on": [],
-            },
-            {
-                "step_number": 2, "agent": "executor",
-                "tool": "notification_tool", "action": "notify_team",
-                "description": "Also alert team via Slack/push",
-                "parameters": {
-                    "team":    "ops",
-                    "message": short_task,
-                    "urgency": urgency,
-                },
-                "depends_on": [1],
-            },
-        ]
-
-    # ── GENERAL (fallback) ────────────────────────────────────────────────────
+    # Fallback for any other type (shouldn't happen)
     return [
         {
             "step_number": 1, "agent": "executor",
-            "tool": "knowledge_tool", "action": "search",
-            "description": f"Search knowledge base for relevant guidance",
-            "parameters": {"query": task, "top_k": 3},
-            "depends_on": [],
-        },
-        {
-            "step_number": 2, "agent": "executor",
-            "tool": "ticket_tool", "action": "create_ticket",
-            "description": "Raise a ticket so the task is tracked",
-            "parameters": {
-                "title":       short_task,
-                "description": task,
-                "priority":    priority,
-                "category":    "general",
-            },
-            "depends_on": [1],
-        },
-        {
-            "step_number": 3, "agent": "executor",
             "tool": "notification_tool", "action": "notify_team",
-            "description": "Notify ops team",
+            "description": "Notify team of unrecognized task",
             "parameters": {
-                "team":    "ops",
-                "message": f"Task in progress: {short_task}",
-                "urgency": urgency,
+                "team": "ops",
+                "message": f"Unrecognized task: {short_task}",
+                "urgency": "high",
             },
-            "depends_on": [2],
+            "depends_on": [],
         },
     ]
 

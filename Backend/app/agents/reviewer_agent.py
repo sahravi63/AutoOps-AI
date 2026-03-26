@@ -142,15 +142,7 @@ def _score_output_quality(step: AgentStep) -> float:
 
 # What every workflow type SHOULD cover (minimum required tool types)
 _REQUIRED_COVERAGE: Dict[str, List[str]] = {
-    "refund":    ["payment_tool", "notification_tool"],
-    "duplicate": ["payment_tool", "notification_tool"],
-    "payment":   ["payment_tool"],
-    "delivery":  ["delivery_tool"],
-    "incident":  ["ticket_tool", "notification_tool"],
-    "resume":    ["resume_tool"],
-    "report":    ["report_tool"],
-    "invoice":   ["invoice_tool"],
-    "general":   ["knowledge_tool"],
+    "payment_failure_remediation": ["payment_tool", "ticket_tool", "notification_tool"],
 }
 
 
@@ -165,6 +157,46 @@ def _check_completeness(workflow_type: str, steps: List[AgentStep]) -> List[str]
             f"Workflow type '{workflow_type}' requires {missing} but those tools "
             f"did not complete successfully."
         )
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Deterministic post-condition checks
+# ---------------------------------------------------------------------------
+
+def _check_post_conditions(steps: List[AgentStep]) -> List[str]:
+    """
+    Verify deterministic invariants after key steps.
+    Returns list of failed checks (empty = all passed).
+    """
+    issues = []
+    
+    # Check refund was processed
+    refund_steps = [s for s in steps if s.tool == "payment_tool" and s.action == "refund"]
+    for step in refund_steps:
+        if step.status == "completed":
+            txn_id = step.input_data.get("parameters", {}).get("transaction_id")
+            if txn_id:
+                # Mock check: in real system, call payment API to verify refund
+                # For now, assume success if no error
+                if "refunded" not in str(step.output_data).lower():
+                    issues.append(f"Refund for {txn_id} not confirmed in output")
+    
+    # Check ticket was created
+    ticket_steps = [s for s in steps if s.tool == "ticket_tool" and s.action == "create_ticket"]
+    for step in ticket_steps:
+        if step.status == "completed":
+            title = step.input_data.get("parameters", {}).get("title")
+            if title and "ticket_id" not in str(step.output_data):
+                issues.append(f"Ticket creation for '{title}' did not return ticket_id")
+    
+    # Check notification was sent
+    notify_steps = [s for s in steps if s.tool == "notification_tool"]
+    for step in notify_steps:
+        if step.status == "completed":
+            if "sent" not in str(step.output_data).lower() and "notified" not in str(step.output_data).lower():
+                issues.append(f"Notification step {step.step_number} output does not confirm delivery")
+    
     return issues
 
 
@@ -244,6 +276,12 @@ def _mock_review(
         recommendations.append(
             f"Add missing tool steps to satisfy {workflow_type} workflow requirements."
         )
+
+    # ── Deterministic post-condition checks ──────────────────────────────
+    post_condition_issues = _check_post_conditions(steps)
+    issues.extend(post_condition_issues)
+    if post_condition_issues:
+        recommendations.append("Fix post-condition failures: verify API responses confirm actions were completed")
 
     # ── Scoring ───────────────────────────────────────────────────────────
     completion_rate = len(completed) / total if total else 0

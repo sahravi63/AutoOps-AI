@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     HF_MODEL:     str = "mistralai/Mistral-7B-Instruct-v0.3"
 
     # ── App ───────────────────────────────────────────────────────────────
-    APP_NAME: str = "AutoOps AI"
+    APP_NAME: str = "Campus Payment Remediation AI"
     DEBUG:    bool = True
 
     # ── Memory / Vector store ─────────────────────────────────────────────

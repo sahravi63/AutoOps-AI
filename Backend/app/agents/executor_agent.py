@@ -200,13 +200,13 @@ class ExecutorAgent:
                 result if isinstance(result, dict) else {"result": str(result)}
             )
             step.status = "completed"
-            logger.info(f"[ExecutorAgent] Step {step.step_number} ✓ completed")
+            logger.info(f"[ExecutorAgent] Step {step.step_number} [OK] completed")
 
         except Exception as e:
             step.status = "failed"
             step.error = str(e)
             logger.error(
-                f"[ExecutorAgent] Step {step.step_number} ✗ failed: {e}"
+                f"[ExecutorAgent] Step {step.step_number} [FAIL] failed: {e}"
             )
 
         finally:
