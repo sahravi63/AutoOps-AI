@@ -18,8 +18,11 @@ import json
 import os
 from typing import Any, Dict, List, Optional
 
+from pydantic import ValidationError
 from app.config.settings import settings
 from app.llm_client import llm_complete, get_llm_client
+from app.models.workflow_model import WorkflowPlan
+from app.tools.all_tools import TOOL_MAP, TOOL_ACTION_WHITELIST
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -69,11 +72,28 @@ Respond ONLY with valid JSON (no markdown fences):
 _WORKFLOW_SIGNALS: List[tuple] = [
     # (workflow_type,  keyword list)
     ("payment_failure_remediation", ["payment failure", "tuition payment failed", "failed payment", "chargeback", "refund", "duplicate charge", "payment error", "bursar", "tuition", "student payment"]),
+    ("software_development", ["build", "create", "develop", "implement", "code", "chatbot", "web app", "api", "rest", "flask", "fastapi", "streamlit", "react", "frontend", "backend", "database", "deploy"]),
+    ("data_analysis", ["analyze", "visualize", "dashboard", "report", "insights", "metrics", "charts", "graphs", "statistics", "ml", "machine learning", "predict"]),
+    ("system_administration", ["server", "deploy", "configure", "setup", "install", "monitor", "backup", "security", "infrastructure"]),
 ]
 
 
 def _infer_workflow_type(task: str) -> str:
-    """Always return payment_failure_remediation for campus focus."""
+    """Infer workflow type from task keywords, with payment focus as fallback."""
+    task_lower = task.lower()
+
+    # Score each workflow type based on keyword matches
+    scores = {}
+    for workflow_type, keywords in _WORKFLOW_SIGNALS:
+        score = sum(1 for keyword in keywords if keyword in task_lower)
+        scores[workflow_type] = score
+
+    # Return highest scoring type, or payment as fallback
+    if scores:
+        best_type = max(scores, key=scores.get)
+        if scores[best_type] > 0:
+            return best_type
+
     return "payment_failure_remediation"
 
 
@@ -85,20 +105,40 @@ def _extract_context(task: str) -> Dict[str, Any]:
     import re
     ctx: Dict[str, Any] = {}
 
-    # Order / transaction / ticket / invoice IDs
+    # Order / transaction / ticket / invoice / student IDs
     for pattern, key in [
-        (r"\b(ORD-[\w]+)\b",  "order_id"),
-        (r"\b(TXN-[\w]+)\b",  "transaction_id"),
-        (r"\b(INV-[\w]+)\b",  "invoice_id"),
-        (r"\b(OPS-[\d]+)\b",  "ticket_id"),
-        (r"\b(CUST-[\w]+)\b", "customer_id"),
+        (r"\b(ORD-[\w]+)\b",    "order_id"),
+        (r"\b(TXN-[\w]+)\b",    "transaction_id"),
+        (r"\b(INV-[\w]+)\b",    "invoice_id"),
+        (r"\b(OPS-[\d]+)\b",    "ticket_id"),
+        (r"\b(CUST-[\w]+)\b",   "customer_id"),
+        (r"\b(STU-[\w]+)\b",    "student_id"),
     ]:
         match = re.search(pattern, task, re.IGNORECASE)
         if match:
             ctx[key] = match.group(1).upper()
 
-    # Monetary amounts  e.g. "$499" or "499.99 USD"
-    amount_match = re.search(r"\$?([\d,]+\.?\d*)\s*(?:USD|INR|EUR)?", task)
+    # Generic Student ID / Customer ID fields in free text
+    if "student_id" not in ctx:
+        student_match = re.search(r"student\s*id\s*[:=]\s*([A-Za-z0-9\-_]+)", task, re.IGNORECASE)
+        if student_match:
+            ctx["student_id"] = student_match.group(1).upper()
+    if "customer_id" not in ctx:
+        customer_match = re.search(r"customer\s*id\s*[:=]\s*([A-Za-z0-9\-_]+)", task, re.IGNORECASE)
+        if customer_match:
+            ctx["customer_id"] = customer_match.group(1).upper()
+
+    # Monetary amounts e.g. "$499", "2999 USD", or "amount 2999"
+    amount_match = re.search(
+        r"(?:amount|fee|total|charged|payment)\s*[:=]?\s*\$?([\d,]+(?:\.\d*)?)\b",
+        task, re.IGNORECASE
+    )
+    if not amount_match:
+        amount_match = re.search(r"\$([\d,]+(?:\.\d*)?)\b", task)
+    if not amount_match:
+        amount_match = re.search(
+            r"\b([\d,]+(?:\.\d*)?)\s*(?:USD|INR|EUR)\b", task, re.IGNORECASE
+        )
     if amount_match:
         try:
             ctx["amount"] = float(amount_match.group(1).replace(",", ""))
@@ -136,19 +176,67 @@ def _db_query(sql: str, params: tuple):
         return None
 
 
+def _normalize_customer_id(raw_id: str) -> str:
+    """Normalize student/customer identifiers to the DB canonical customer_id."""
+    if not raw_id:
+        return raw_id
+    token = raw_id.strip().upper()
+    if token.startswith("STU-"):
+        return token.replace("STU-", "CUST-", 1)
+    if token.startswith("CUST-"):
+        return token
+    if token.isdigit():
+        return f"CUST-{token}"
+    return token
+
+
 def _resolve_transaction_id(ctx: Dict[str, Any]) -> str:
     """Return a real txn_id from context, DB lookup by student, or sentinel."""
     if ctx.get("transaction_id"):
         return ctx["transaction_id"]
     student_id = ctx.get("student_id") or ctx.get("customer_id")  # backward compatibility
+    amount = ctx.get("amount")
+
     if student_id:
+        candidates = [student_id]
+        if student_id.startswith("STU-"):
+            candidates.append(student_id.replace("STU-", "CUST-", 1))
+        elif student_id.startswith("CUST-"):
+            candidates.append(student_id.replace("CUST-", "STU-", 1))
+        elif student_id.isdigit():
+            candidates.append(f"CUST-{student_id}")
+
+        if amount is not None:
+            for cid in candidates:
+                row = _db_query(
+                    "SELECT txn_id FROM transactions WHERE customer_id=? AND amount=? ORDER BY created_at DESC LIMIT 1",
+                    (cid, amount)
+                )
+                if row:
+                    logger.info(
+                        f"[MockPlanner] Resolved transaction_id={row['txn_id']} "
+                        f"for student={student_id} amount={amount}"
+                    )
+                    return row["txn_id"]
+
+        for cid in candidates:
+            row = _db_query(
+                "SELECT txn_id FROM transactions WHERE customer_id=? ORDER BY created_at DESC LIMIT 1",
+                (cid,)
+            )
+            if row:
+                logger.info(f"[MockPlanner] Resolved transaction_id={row['txn_id']} for student={student_id}")
+                return row["txn_id"]
+
+    if amount is not None:
         row = _db_query(
-            "SELECT txn_id FROM transactions WHERE customer_id=? ORDER BY created_at DESC LIMIT 1",
-            (student_id,)
+            "SELECT txn_id FROM transactions WHERE amount=? AND status='failed' ORDER BY created_at DESC LIMIT 1",
+            (amount,)
         )
         if row:
-            logger.info(f"[MockPlanner] Resolved transaction_id={row['txn_id']} for student={student_id}")
+            logger.info(f"[MockPlanner] Resolved transaction_id={row['txn_id']} for amount={amount}")
             return row["txn_id"]
+
     return "TXN-UNKNOWN"
 
 
@@ -170,8 +258,17 @@ def _resolve_order_id(ctx: Dict[str, Any]) -> str:
 
 def _resolve_customer_id(ctx: Dict[str, Any]) -> str:
     """Return a real student_id from context, DB lookup by order/txn, or sentinel."""
-    if ctx.get("student_id") or ctx.get("customer_id"):
-        return ctx.get("student_id") or ctx["customer_id"]
+    raw_id = ctx.get("student_id") or ctx.get("customer_id")
+    if raw_id:
+        normalized = _normalize_customer_id(raw_id)
+        if normalized != raw_id:
+            row = _db_query(
+                "SELECT customer_id FROM customers WHERE customer_id=? LIMIT 1",
+                (normalized,)
+            )
+            if row:
+                return row["customer_id"]
+        return raw_id
     order_id = ctx.get("order_id")
     if order_id:
         row = _db_query(
@@ -313,6 +410,55 @@ def _build_steps(workflow_type: str, task: str, ctx: Dict[str, Any]) -> List[Dic
             },
         ]
 
+    # ── SOFTWARE DEVELOPMENT ────────────────────────────────────────────────
+    elif workflow_type == "software_development":
+        return [
+            {
+                "step_number": 1, "agent": "executor",
+                "tool": "code_tool", "action": "generate_code",
+                "description": "Generate code based on the development requirements",
+                "parameters": {
+                    "description": task,
+                    "language": "python",
+                    "framework": "fastapi",
+                    "requirements": "REST API with proper error handling and validation"
+                },
+                "depends_on": [],
+            },
+            {
+                "step_number": 2, "agent": "executor",
+                "tool": "code_tool", "action": "create_file",
+                "description": "Create the main application file",
+                "parameters": {
+                    "filename": "app.py",
+                    "content": "{GENERATED_CODE}",  # Will be replaced with step 1 output
+                    "directory": "./generated_app"
+                },
+                "depends_on": [1],
+            },
+            {
+                "step_number": 3, "agent": "executor",
+                "tool": "code_tool", "action": "run_command",
+                "description": "Test the generated application",
+                "parameters": {
+                    "command": "cd generated_app && python -c \"import app; print('App imports successfully')\"",
+                    "cwd": "."
+                },
+                "depends_on": [2],
+            },
+            {
+                "step_number": 4, "agent": "executor",
+                "tool": "notification_tool", "action": "notify_team",
+                "description": "Notify team of successful code generation",
+                "parameters": {
+                    "team": "dev",
+                    "message": f"Software development task completed: {short_task[:50]}...",
+                    "urgency": urgency,
+                },
+                "depends_on": [3],
+            },
+        ]
+
     # Fallback for any other type (shouldn't happen)
     return [
         {
@@ -378,6 +524,28 @@ def _mock_plan(task: str, feedback: str = "", memory_hints: list = None) -> Dict
     }
 
 
+def _validate_workflow_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate planner output against schema and tool access policy."""
+    try:
+        validated = WorkflowPlan.model_validate(plan)
+    except ValidationError as exc:
+        raise ValueError(f"Workflow plan schema invalid: {exc}") from exc
+
+    for step in validated.steps:
+        if step.tool not in TOOL_MAP:
+            raise ValueError(
+                f"Plan contains disallowed tool '{step.tool}'. "
+                f"Allowed tools: {list(TOOL_MAP.keys())}"
+            )
+        allowed_actions = TOOL_ACTION_WHITELIST.get(step.tool, [])
+        if step.action not in allowed_actions:
+            raise ValueError(
+                f"Tool '{step.tool}' does not allow action '{step.action}'. "
+                f"Allowed actions: {allowed_actions}"
+            )
+    return validated.model_dump(mode="json")
+
+
 # ---------------------------------------------------------------------------
 # PlannerAgent — hybrid: real LLM or mock
 # ---------------------------------------------------------------------------
@@ -422,6 +590,7 @@ class PlannerAgent:
         if self._use_mock:
             logger.info("[PlannerAgent] Using mock planner (no API key)")
             plan = _mock_plan(task, feedback, memory_hints or [])
+            plan = _validate_workflow_plan(plan)
             logger.info(
                 f"[PlannerAgent] Mock plan ready — {len(plan['steps'])} steps | "
                 f"type={plan['workflow_type']}"
@@ -453,6 +622,7 @@ class PlannerAgent:
             raw = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
 
         plan = json.loads(raw)
+        plan = _validate_workflow_plan(plan)
         step_count = len(plan.get("steps", []))
         logger.info(
             f"[PlannerAgent] Plan ready — {step_count} steps | "

@@ -39,6 +39,21 @@ def test_extract_context_ids():
     assert ctx["customer_id"]    == "CUST-00123"
     assert ctx["amount"]         == 499.0
 
+def test_extract_context_student_id():
+    ctx = _extract_context("Student payment failed but tuition fee was deducted. Student ID: STU-00123, amount $2999.")
+    assert ctx["student_id"] == "STU-00123"
+    assert ctx["amount"] == 2999.0
+
+def test_extract_context_generic_student_id():
+    ctx = _extract_context("Student payment failed. Student ID: 12345, amount $2999.")
+    assert ctx["student_id"] == "12345"
+    assert ctx["amount"] == 2999.0
+
+def test_planner_resolves_transaction_by_student_id():
+    planner = PlannerAgent()
+    plan = planner.plan("Student payment failed but tuition fee was deducted. Student ID: STU-00123, amount $1299.")
+    assert plan["steps"][0]["parameters"]["transaction_id"] == "TXN-AB12CD34"
+
 def test_extract_context_priority():
     ctx = _extract_context("URGENT: production is down")
     assert ctx["priority"] == "high"

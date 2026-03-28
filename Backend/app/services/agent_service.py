@@ -172,7 +172,7 @@ async def run_autonomous_workflow(
             logger.info(f"[UPDATE] Quality check PASSED on loop {loop_num} ✓")
             result.status = "completed"
             # Store successful pattern in memory so future runs benefit
-            _store_memory(task, plan, review)
+            _store_memory(task, plan, review, context=context or {})
             break
         else:
             # Build STRUCTURED, targeted feedback for the planner
@@ -231,8 +231,14 @@ async def run_autonomous_workflow(
 # Memory helper — store successful workflow patterns
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _store_memory(task: str, plan: Dict[str, Any], review: Dict[str, Any]) -> None:
+def _store_memory(
+    task: str,
+    plan: Dict[str, Any],
+    review: Dict[str, Any],
+    context: Optional[Dict[str, Any]] = None,
+) -> None:
     """Store a successful workflow pattern in memory for future reference."""
+    context = context or {}
     mem_update = review.get("memory_update", {})
     should_store = mem_update.get("store", True)
 
@@ -240,13 +246,18 @@ def _store_memory(task: str, plan: Dict[str, Any], review: Dict[str, Any]) -> No
         return
 
     category = mem_update.get("category") or plan.get("workflow_type", "general")
-    lesson   = mem_update.get("lesson")   or review.get("summary", "Workflow completed successfully")
+    lesson = mem_update.get("lesson") or review.get("summary", "Workflow completed successfully")
+    tenant_id = context.get("tenant_id", "") or plan.get("extracted_context", {}).get("tenant_id", "")
+    error_code = context.get("error_code", "") or plan.get("extracted_context", {}).get("error_code", "")
 
     try:
         mem_id = memory_agent.store(
             category=category,
             problem=task,
             solution=lesson,
+            workflow_id=context.get("workflow_id", ""),
+            tenant_id=tenant_id,
+            error_code=error_code,
         )
         logger.info(f"[MEMORY] Stored pattern {mem_id} in category '{category}'")
     except Exception as e:
@@ -435,6 +446,7 @@ async def run_autonomous_workflow_streaming(
     yield ("complete", {
         "workflow_id": workflow_id,
         "passed": final_review.get("passed", False),
+        "confidence": final_review.get("confidence", 0),
         "loops_used": loop_num,
         "summary": final_review.get("summary", ""),
         "next_actions": final_review.get("next_actions", []),

@@ -83,8 +83,15 @@ class MemoryAgent:
             })
         return results
 
-    def store(self, category: str, problem: str,
-              solution: str, workflow_id: str = "") -> str:
+    def store(
+        self,
+        category: str,
+        problem: str,
+        solution: str,
+        workflow_id: str = "",
+        tenant_id: str = "",
+        error_code: str = "",
+    ) -> str:
         mem_id = f"mem-{len(self._store)+1:03d}"
         self._store.append({
             "id": mem_id,
@@ -92,6 +99,8 @@ class MemoryAgent:
             "problem": problem,
             "solution": solution,
             "workflow_id": workflow_id,
+            "tenant_id": tenant_id,
+            "error_code": error_code,
             "timestamp": datetime.utcnow().isoformat(),
             "success_count": 1,
         })

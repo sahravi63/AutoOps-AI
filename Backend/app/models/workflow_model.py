@@ -28,6 +28,27 @@ class AgentStep(BaseModel):
         return None
 
 
+class WorkflowStep(BaseModel):
+    step_number: int = Field(..., ge=1)
+    agent: str = "executor"
+    tool: str
+    action: str
+    description: str = ""
+    parameters: Dict[str, Any] = {}
+    depends_on: List[int] = []
+
+
+class WorkflowPlan(BaseModel):
+    task_summary: str
+    workflow_type: str = Field(default="payment_failure_remediation")
+    steps: List[WorkflowStep]
+    estimated_duration_seconds: int = Field(default=0, ge=0)
+    risk_level: str = Field(default="medium")
+    retry_reason: str = ""
+    mode: str = "mock"
+    extracted_context: Dict[str, Any] = {}
+
+
 class WorkflowResult(BaseModel):
     workflow_id: str = Field(default_factory=lambda: str(uuid.uuid4())[:12])
     task: str

@@ -45,12 +45,11 @@ DEMO_TASKS = [
         "context": {"student_id": "STU-00456", "amount": 1499},
     },
     {
-        "name": "Bursar Refund Request",
-        "task": "Process refund for failed tuition payment TXN-AB12CD34.",
+        "name": "Refund Reconciliation",
+        "task": "Process refund for failed tuition payment TXN-AB12CD34 and confirm ledger balance.",
         "context": {"transaction_id": "TXN-AB12CD34", "reason": "Payment gateway failure"},
     },
 ]
-    },
 ]
 
 DIVIDER = "═" * 70

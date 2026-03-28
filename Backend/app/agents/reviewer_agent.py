@@ -23,6 +23,7 @@ from typing import Any, Dict, List
 from app.config.settings import settings
 from app.llm_client import llm_complete, get_llm_client
 from app.models.workflow_model import AgentStep
+from app.tools.all_tools import PaymentTool
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -173,12 +174,18 @@ def _check_post_conditions(steps: List[AgentStep]) -> List[str]:
     
     # Check refund was processed
     refund_steps = [s for s in steps if s.tool == "payment_tool" and s.action == "refund"]
+    payment_tool = PaymentTool()
     for step in refund_steps:
         if step.status == "completed":
             txn_id = step.input_data.get("parameters", {}).get("transaction_id")
-            if txn_id:
-                # Mock check: in real system, call payment API to verify refund
-                # For now, assume success if no error
+            refund_id = step.output_data.get("refund_id") if isinstance(step.output_data, dict) else None
+            if txn_id and refund_id:
+                verified = payment_tool.verify_refund_status(txn_id, refund_id)
+                if not verified:
+                    issues.append(
+                        f"Refund {refund_id} for transaction {txn_id} did not verify successfully"
+                    )
+            elif txn_id:
                 if "refunded" not in str(step.output_data).lower():
                     issues.append(f"Refund for {txn_id} not confirmed in output")
     

@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Dict, List
 
 from app.models.workflow_model import AgentStep
-from app.tools.all_tools import TOOL_MAP
+from app.tools.all_tools import TOOL_MAP, TOOL_ACTION_WHITELIST, TOOL_SCOPES
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -172,7 +172,24 @@ class ExecutorAgent:
         )
 
         try:
+            if step.tool not in TOOL_ACTION_WHITELIST:
+                raise ValueError(
+                    f"Unknown or disallowed tool '{step.tool}'. Allowed tools: {list(TOOL_ACTION_WHITELIST.keys())}"
+                )
+            if step.action not in TOOL_ACTION_WHITELIST.get(step.tool, []):
+                raise ValueError(
+                    f"Tool '{step.tool}' does not permit action '{step.action}'. "
+                    f"Allowed actions: {TOOL_ACTION_WHITELIST.get(step.tool, [])}"
+                )
             tool = self._get_tool(step.tool)
+            user_role = step.input_data.get("parameters", {}).get("user_role", "system")
+            allowed_roles = TOOL_SCOPES.get(step.tool, [])
+            if user_role not in allowed_roles:
+                raise PermissionError(
+                    f"RBAC denied {user_role} for tool '{step.tool}'. "
+                    f"Allowed roles: {allowed_roles}"
+                )
+
             method = getattr(tool, step.action, None)
 
             # Fall back to execute() if specific method not found

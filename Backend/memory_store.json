@@ -35,11 +35,124 @@
   },
   {
     "id": "mem-005",
-    "category": "payment_failure_remediation",
-    "problem": "Customer payment failed but money was deducted. Customer ID: CUST-00123, amount Rs.2999.",
-    "solution": "Successfully completed payment_failure_remediation workflow: Customer payment failed but money was deducted. Customer ID: CUST-00123, amount ",
+    "category": "software_development",
+    "problem": "\n    Build a simple REST API for user management with the following features:\n    1. Create user endpoint (POST /users)\n    2. Get user by ID endpoint (GET /users/{id})\n    3. List all users endpoint (GET /users)\n    4. Update user endpoint (PUT /users/{id})\n    5. Delete user endpoint (DELETE /users/{id})\n\n    Use FastAPI framework, include proper error handling, and add basic validation.\n    ",
+    "solution": "Successfully completed software_development workflow: \n    Build a simple REST API for user management with the following features:\n  ",
     "workflow_id": "",
-    "timestamp": "2026-03-26T17:12:59.027163",
+    "timestamp": "2026-03-27T08:34:37.647402",
+    "success_count": 1
+  },
+  {
+    "id": "mem-006",
+    "category": "software_development",
+    "problem": "\n    Build a simple REST API for user management with the following features:\n    1. Create user endpoint (POST /users)\n    2. Get user by ID endpoint (GET /users/{id})\n    3. List all users endpoint (GET /users)\n    4. Update user endpoint (PUT /users/{id})\n    5. Delete user endpoint (DELETE /users/{id})\n\n    Use FastAPI framework, include proper error handling, and add basic validation.\n    ",
+    "solution": "Successfully completed software_development workflow: \n    Build a simple REST API for user management with the following features:\n  ",
+    "workflow_id": "",
+    "timestamp": "2026-03-27T08:35:26.148581",
+    "success_count": 1
+  },
+  {
+    "id": "mem-007",
+    "category": "payment_failure_remediation",
+    "problem": "Process refund for failed tuition payment TXN-AB12CD34.",
+    "solution": "Successfully completed payment_failure_remediation workflow: Process refund for failed tuition payment TXN-AB12CD34.",
+    "workflow_id": "",
+    "timestamp": "2026-03-27T12:14:42.511829",
+    "success_count": 1
+  },
+  {
+    "id": "mem-008",
+    "category": "payment_failure_remediation",
+    "problem": "Process refund for failed tuition payment TXN-AB12CD34.",
+    "solution": "Successfully completed payment_failure_remediation workflow: Process refund for failed tuition payment TXN-AB12CD34.",
+    "workflow_id": "",
+    "timestamp": "2026-03-28T10:37:34.768267",
+    "success_count": 1
+  },
+  {
+    "id": "mem-009",
+    "category": "payment_failure_remediation",
+    "problem": "Student reports payment processed but not reflected in bursar system. TXN-XY98ZW11.",
+    "solution": "Successfully completed payment_failure_remediation workflow: Student reports payment processed but not reflected in bursar system. TXN-XY98ZW",
+    "workflow_id": "",
+    "timestamp": "2026-03-28T10:38:09.292893",
+    "success_count": 1
+  },
+  {
+    "id": "mem-010",
+    "category": "payment_failure_remediation",
+    "problem": "Student payment failed but tuition fee was deducted. Student ID: STU-00123, amount $2999.",
+    "solution": "Successfully completed payment_failure_remediation workflow: Student payment failed but tuition fee was deducted. Student ID: STU-00123, amou",
+    "workflow_id": "",
+    "tenant_id": "",
+    "error_code": "",
+    "timestamp": "2026-03-28T12:07:43.340824",
+    "success_count": 1
+  },
+  {
+    "id": "mem-011",
+    "category": "payment_failure_remediation",
+    "problem": "Student payment failed but tuition fee was deducted. Student ID: STU-00123, amount $2999.",
+    "solution": "Successfully completed payment_failure_remediation workflow: Student payment failed but tuition fee was deducted. Student ID: STU-00123, amou",
+    "workflow_id": "",
+    "tenant_id": "",
+    "error_code": "",
+    "timestamp": "2026-03-28T12:13:34.894281",
+    "success_count": 1
+  },
+  {
+    "id": "mem-012",
+    "category": "payment_failure_remediation",
+    "problem": "Student STU-00456 was charged twice for $1499 tuition payment.",
+    "solution": "Successfully completed payment_failure_remediation workflow: Student STU-00456 was charged twice for $1499 tuition payment.",
+    "workflow_id": "",
+    "tenant_id": "",
+    "error_code": "",
+    "timestamp": "2026-03-28T12:14:43.050639",
+    "success_count": 1
+  },
+  {
+    "id": "mem-013",
+    "category": "payment_failure_remediation",
+    "problem": "Student STU-00456 was charged twice for $1499 tuition payment.",
+    "solution": "Successfully completed payment_failure_remediation workflow: Student STU-00456 was charged twice for $1499 tuition payment.",
+    "workflow_id": "",
+    "tenant_id": "",
+    "error_code": "",
+    "timestamp": "2026-03-28T12:16:09.959584",
+    "success_count": 1
+  },
+  {
+    "id": "mem-014",
+    "category": "payment_failure_remediation",
+    "problem": "Process refund for failed tuition payment TXN-AB12CD34 and confirm ledger balance.",
+    "solution": "Successfully completed payment_failure_remediation workflow: Process refund for failed tuition payment TXN-AB12CD34 and confirm ledger balanc",
+    "workflow_id": "",
+    "tenant_id": "",
+    "error_code": "",
+    "timestamp": "2026-03-28T12:17:53.168430",
+    "success_count": 1
+  },
+  {
+    "id": "mem-015",
+    "category": "payment_failure_remediation",
+    "problem": "Student payment failed but tuition fee was deducted. Student ID: STU-00123, amount $2999.",
+    "solution": "Successfully completed payment_failure_remediation workflow: Student payment failed but tuition fee was deducted. Student ID: STU-00123, amou",
+    "workflow_id": "",
+    "tenant_id": "",
+    "error_code": "",
+    "timestamp": "2026-03-28T12:21:45.507492",
+    "success_count": 1
+  },
+  {
+    "id": "mem-016",
+    "category": "payment_failure_remediation",
+    "problem": "Process refund for failed tuition payment TXN-AB12CD34 and confirm ledger balance.",
+    "solution": "Successfully completed payment_failure_remediation workflow: Process refund for failed tuition payment TXN-AB12CD34 and confirm ledger balanc",
+    "workflow_id": "",
+    "tenant_id": "",
+    "error_code": "",
+    "timestamp": "2026-03-28T12:22:37.015139",
     "success_count": 1
   }
 ]

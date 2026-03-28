@@ -21,6 +21,17 @@ class Settings(BaseSettings):
     CHROMA_PERSIST_DIR: str = "./chroma_db"
     EMBEDDING_MODEL:    str = "all-MiniLM-L6-v2"
 
+    # ── External integrations ─────────────────────────────────────────────
+    STRIPE_API_KEY: str = ""
+    SERVICENOW_INSTANCE_URL: str = ""
+    SERVICENOW_USER: str = ""
+    SERVICENOW_PASSWORD: str = ""
+    ITSM_WEBHOOK_URL: str = ""
+    SLACK_WEBHOOK_URL: str = ""
+    EMAIL_WEBHOOK_URL: str = ""
+    REFUND_APPROVAL_THRESHOLD: int = 2000
+    DRY_RUN_MODE: bool = False
+
     class Config:
         env_file = ".env"
 
